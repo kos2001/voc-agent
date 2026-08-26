@@ -11,6 +11,17 @@ type QItem = {
   based_on: string; created_at: string; state: string; comment_id?: string; source?: string;
 };
 
+type Cause = { code: string; label: string; lever: string; hint: string };
+
+// 레버별 색 — 사람이 "이건 어느 쪽 문제인가"를 라벨 고르는 순간에 인지하게 한다.
+const LEVER_STYLE: Record<string, string> = {
+  retrieval: "border-amber-700 text-amber-300",
+  generation: "border-sky-700 text-sky-300",
+  knowledge: "border-violet-700 text-violet-300",
+  presentation: "border-zinc-600 text-zinc-300",
+  other: "border-zinc-700 text-zinc-400",
+};
+
 export default function RcaQueue({ onBack, onChange }: { onBack: () => void; onChange?: () => void }) {
   const [items, setItems] = useState<QItem[]>([]);
   const [busy, setBusy] = useState<string>("");
@@ -20,6 +31,12 @@ export default function RcaQueue({ onBack, onChange }: { onBack: () => void; onC
   const [panelTab, setPanelTab] = useState<Record<string, "edit" | "preview">>({}); // 편집/미리보기
   const [valid, setValid] = useState<Record<string, any>>({});       // key → 검증 결과
   const [validating, setValidating] = useState<string>("");
+  // 원인 라벨 — 서버의 닫힌 목록(draft_feedback.CAUSES)을 받아 쓴다. 프런트에 하드코딩하면
+  // 두 곳이 갈라지고, 갈라진 코드로 저장된 원인은 집계에서 조용히 'other' 로 접힌다.
+  const [causes, setCauses] = useState<Cause[]>([]);
+  const [picked, setPicked] = useState<Record<string, string[]>>({});   // key → 원인 코드
+  const [note, setNote] = useState<Record<string, string>>({});
+  const [labeling, setLabeling] = useState<string>("");                 // 라벨 패널 열린 key
 
   // 실패를 삼키면 items=[] 가 되어 "대기 중인 초안이 없습니다" 로 보인다 —
   // 승인 대기 건이 있는데도 없는 것처럼 보이는 것이 가장 나쁜 오표시다.
@@ -33,6 +50,16 @@ export default function RcaQueue({ onBack, onChange }: { onBack: () => void; onC
       .catch((e) => setLoadErr(e.message || "불러오기 실패"));
   };
   useEffect(() => { load(); }, []);
+  useEffect(() => {
+    fetch(`${API}/rca/draft-feedback`).then((r) => (r.ok ? r.json() : null))
+      .then((d) => d && setCauses(d.taxonomy ?? [])).catch(() => {});
+  }, []);
+
+  const toggleCause = (key: string, code: string) =>
+    setPicked((p) => {
+      const cur = p[key] ?? [];
+      return { ...p, [key]: cur.includes(code) ? cur.filter((c) => c !== code) : [...cur, code] };
+    });
 
   const bodyOf = (it: QItem) => (edits[it.key] ?? it.body);
   const isEdited = (it: QItem) => (it.key in edits) && edits[it.key].trim() !== it.body.trim();
@@ -52,7 +79,7 @@ export default function RcaQueue({ onBack, onChange }: { onBack: () => void; onC
     const key = it.key;
     setBusy(key + action); setMsg(null);
     try {
-      const payload: any = { key };
+      const payload: any = { key, causes: picked[key] ?? [], note: note[key] ?? "" };
       if (action === "approve" && isEdited(it)) payload.body = edits[key];  // 수정본 게시
       const d = await fetch(`${API}/rca/${action}`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
@@ -61,7 +88,8 @@ export default function RcaQueue({ onBack, onChange }: { onBack: () => void; onC
         setMsg(d.ok ? { key, ok: true, text: `Jira 게시 완료${d.edited ? " (수정본, 메모리 저장됨)" : ""}${d.item?.comment_id ? ` · 댓글 #${d.item.comment_id}` : ""}` }
                     : { key, ok: false, text: `게시 실패: ${d.error || ""}` });
       } else {
-        setMsg({ key, ok: true, text: "거부됨 (게시 안 함)" });
+        const n = (picked[key] ?? []).length;
+        setMsg({ key, ok: true, text: n ? `거부됨 (게시 안 함) · 사유 ${n}건 기록` : "거부됨 (게시 안 함) — 사유 미기록" });
       }
       await load(); onChange?.();
     } finally { setBusy(""); }
@@ -162,7 +190,37 @@ export default function RcaQueue({ onBack, onChange }: { onBack: () => void; onC
                 {msg && msg.key === it.key && (
                   <div className={`mt-2 text-xs ${msg.ok ? "text-emerald-400" : "text-red-400"}`}>{msg.ok ? "✓" : "✗"} {msg.text}</div>
                 )}
+                {labeling === it.key && (
+                  <div className="mt-3 rounded-lg border border-zinc-700 bg-zinc-900/60 p-3">
+                    <div className="text-xs text-zinc-400 mb-2">
+                      왜 이 초안이 부족한가요? (복수 선택) — 같은 원인이 반복되면 다음 초안의
+                      생성 규칙과 개선 큐에 자동 반영됩니다.
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {causes.map((c) => {
+                        const on = (picked[it.key] ?? []).includes(c.code);
+                        return (
+                          <button key={c.code} title={`${c.hint} · 레버: ${c.lever}`}
+                            onClick={() => toggleCause(it.key, c.code)}
+                            className={`text-xs px-2 py-1 rounded border transition ${
+                              on ? "bg-zinc-100 text-zinc-900 border-zinc-100"
+                                 : `bg-transparent hover:bg-zinc-800 ${LEVER_STYLE[c.lever] ?? LEVER_STYLE.other}`}`}>
+                            {c.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <textarea value={note[it.key] ?? ""} rows={2}
+                      onChange={(e) => setNote((n) => ({ ...n, [it.key]: e.target.value }))}
+                      placeholder="추가 설명(선택) — 분류로 담기 어려운 맥락만 적으세요."
+                      className={`${inputCls} mt-2 w-full text-xs`} />
+                  </div>
+                )}
                 <div className="mt-3 flex gap-2">
+                  <button onClick={() => setLabeling(labeling === it.key ? "" : it.key)}
+                    className="text-sm px-4 py-2 rounded-lg border border-zinc-600 text-zinc-300 hover:bg-zinc-800">
+                    🏷 사유 {(picked[it.key] ?? []).length > 0 ? `(${(picked[it.key] ?? []).length})` : ""}
+                  </button>
                   <button onClick={() => validate(it)} disabled={!!validating}
                     className="text-sm px-4 py-2 rounded-lg border border-zinc-600 text-sky-400 hover:bg-zinc-800 disabled:opacity-50">
                     {validating === it.key ? "검증 중…" : "🔎 검증"}

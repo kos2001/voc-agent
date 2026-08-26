@@ -53,6 +53,7 @@ import negative_knowledge  # noqa: E402
 import ontology  # noqa: E402
 import ownership  # noqa: E402
 import quality_gate  # noqa: E402
+import draft_feedback  # noqa: E402
 import rca_feedback  # noqa: E402
 import rca_queue  # noqa: E402
 import reco_feedback  # noqa: E402
@@ -289,6 +290,15 @@ def current_user(request: Request) -> auth.User | None:
     if email:
         return auth.resolve_email(users, email, via="proxy")
     return None
+
+
+def _actor(request: Request) -> str:
+    """검토자 식별자 — 원인 라벨이 누구 판단인지 남긴다(인증 비활성이면 빈 문자열)."""
+    try:
+        u = current_user(request)
+        return (u.subject or u.email or u.name) if u else ""
+    except Exception:
+        return ""
 
 
 def require(capability: str):
@@ -1135,6 +1145,17 @@ def _explain_prompt_md(query_rec: dict, match_recs: list[dict]) -> str:
                        + blocks + "\n")
     except Exception:
         pass
+    # 초안 결함 원인 환류: 같은 고장 클래스에서 **반복 지적된** 항목을 규칙으로 주입.
+    # rca_feedback few-shot 이 "이렇게 써라"(모범)라면, 이건 "이건 하지 마라"(실패)다.
+    # 둘 다 필요하다 — 모범만 보여주면 모델은 자기가 반복하는 실수를 못 본다.
+    # 1회 지적은 규칙이 되지 않는다(GUIDANCE_MIN_COUNT) — 노이즈가 규칙이 되면
+    # 프롬프트가 한 사람의 취향으로 흘러간다.
+    guidance = ""
+    try:
+        guidance = draft_feedback.prompt_guidance(
+            category=q.get("category", ""), template=template_key(q.get("summary", "")))
+    except Exception:
+        pass
     # 부정지식(P2-7): 질의·근거 사례에서 이미 기각된 가설을 주입 → 재안 방지
     negatives = ""
     try:
@@ -1166,7 +1187,7 @@ def _explain_prompt_md(query_rec: dict, match_recs: list[dict]) -> str:
         "구분할 수 있어야 합니다 — 그 구분이 안 되면 분석을 신뢰할 수 없습니다.\n\n"
         f"## 미해결 이슈\n{q.get('summary','')}\n증상: {q.get('symptom','')}\n"
         f"칩: {q.get('chip','')} / 분류: {q.get('category','')}{q_extra}\n\n"
-        f"## 과거 해결 사례\n{cases}\n{fewshot}{negatives}"
+        f"## 과거 해결 사례\n{cases}\n{fewshot}{guidance}{negatives}"
         + _allowed_keys_block(match_recs))
 
 
@@ -2090,10 +2111,12 @@ def rca_pending():
 class ApproveBody(BaseModel):
     key: str
     body: Optional[str] = None   # 사람이 수정한 본문(있으면 이걸 게시·기록)
+    causes: list[str] = []       # 수정 원인(draft_feedback.CAUSES). 없으면 diff 에서 자동 추정
+    note: str = ""
 
 
 @app.post("/rca/approve", dependencies=[Depends(require("rca.approve"))])
-def rca_approve(req: ApproveBody):
+def rca_approve(req: ApproveBody, request: Request):
     """HITL 게이트 — 사람 승인(+수정) 시에만 Jira에 게시. 수정 내용은 피드백에 기록."""
     item = rca_queue.get(req.key)
     if not item:
@@ -2117,6 +2140,19 @@ def rca_approve(req: ApproveBody):
                             category=rec.get("category", ""),
                             template=template_key(item.get("summary", "")),
                             symptom=rec.get("symptom", ""), chip=rec.get("chip", ""))
+        # 초안 결함 원인 분류 적재 — 사람이 라벨을 주면 그것이 정본, 없으면 diff 에서
+        # 추정한다. 무수정 승인도 남긴다(분모가 없으면 clean_rate 를 계산할 수 없다).
+        # 실패해도 게시는 유효해야 하므로 삼킨다 — 신호 수집이 부작용을 막으면 안 된다.
+        try:
+            draft_feedback.record_edit(
+                key=req.key, original=original, final=final,
+                causes=req.causes, note=req.note,
+                category=rec.get("category", ""), template=template_key(item.get("summary", "")),
+                chip=rec.get("chip", ""), source=item.get("source", ""),
+                citations=cited, confidence=item.get("confidence"),
+                reviewer=_actor(request))
+        except Exception:
+            pass
         # 영속화: 큐레이션 지식을 git 추적 저장소에 적재(버전·백업·공유). 실패해도 게시는 유효.
         persisted = None
         try:
@@ -2131,6 +2167,7 @@ def rca_approve(req: ApproveBody):
         _invalidate_reco()  # KB 환류 반영 — 다음 요청 시 큐레이션 항목 포함해 재빌드
         return {"ok": True, "item": updated, "edited": original.strip() != final.strip(),
                 "counts": rca_queue.counts(), "feedback": rca_feedback.stats(),
+                "draft_feedback": draft_feedback.stats(),
                 "persisted": bool(persisted), "knowledge": knowledge_store.stats()}
     except Exception as e:
         return {"ok": False, "error": str(e)[:200]}
@@ -2139,6 +2176,22 @@ def rca_approve(req: ApproveBody):
 @app.get("/rca/feedback", dependencies=[Depends(require("knowledge.read"))])
 def rca_feedback_stats():
     return {"stats": rca_feedback.stats(), "recent_edits": rca_feedback.recent_edits(5)}
+
+
+@app.get("/rca/draft-feedback", dependencies=[Depends(require("knowledge.read"))])
+def rca_draft_feedback(template: str = "", cause: str = "", limit: int = 20):
+    """초안 결함 원인 대시보드 — 축적된 거부/수정 사유와 그것이 가리키는 레버.
+
+    taxonomy 를 같이 내려 프런트가 원인 목록을 하드코딩하지 않게 한다(닫힌 목록의
+    단일 소스는 draft_feedback.CAUSES 하나다).
+    """
+    return {
+        "stats": draft_feedback.stats(),
+        "by_class": draft_feedback.by_class(),
+        "trend": draft_feedback.trend(),
+        "taxonomy": draft_feedback.taxonomy(),
+        "recent": draft_feedback.events(template=template, cause=cause, limit=limit),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2535,10 +2588,36 @@ def knowledge_rebuild_from_jira():
         return {"ok": False, "error": str(e)[:200]}
 
 
+class RejectBody(BaseModel):
+    key: str
+    causes: list[str] = []       # draft_feedback.CAUSES 코드 (닫힌 목록)
+    note: str = ""               # 자유 서술(집계 대상 아님 — 원인은 causes 로만 센다)
+
+
 @app.post("/rca/reject", dependencies=[Depends(require("rca.approve"))])
-def rca_reject(req: KeyBody):
-    updated = rca_queue.set_state(req.key, "rejected")
-    return {"ok": bool(updated), "item": updated, "counts": rca_queue.counts()}
+def rca_reject(req: RejectBody, request: Request):
+    """거부 — **사유를 반드시 함께 남긴다.**
+
+    예전에는 상태만 rejected 로 바꾸고 끝이라, "왜 이 초안이 못 쓰게 됐나" 가
+    어디에도 남지 않았다. 그래서 다음 초안이 같은 실수를 반복해도 알 수 없었다.
+    거부는 가장 강한 부정 신호다 — 여기서 버리면 개선할 근거 자체가 없다.
+    """
+    item = rca_queue.get(req.key) or {}
+    updated = rca_queue.set_state(req.key, "rejected",
+                                  reject_causes=draft_feedback.normalize_causes(req.causes),
+                                  reject_note=(req.note or "")[:1000])
+    fb = None
+    if updated:
+        rec = _reco_state()["by_key"].get(req.key, {})
+        fb = draft_feedback.record(
+            key=req.key, outcome="rejected", causes=req.causes,
+            origin="human", note=req.note,
+            category=rec.get("category", ""), template=template_key(item.get("summary", "")),
+            chip=rec.get("chip", ""), source=item.get("source", ""),
+            citations=sorted(set(re.findall(r"LSI-\d+", item.get("body", "")))),
+            confidence=item.get("confidence"), reviewer=_actor(request))
+    return {"ok": bool(updated), "item": updated, "counts": rca_queue.counts(),
+            "feedback": fb, "draft_feedback": draft_feedback.stats()}
 
 
 class JudgeScore(BaseModel):
