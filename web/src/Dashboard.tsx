@@ -9,7 +9,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { BarList, Donut, RateBar, StatTile, type BarItem } from "./charts";
-import { ErrorNote, PageHeader, SectionTitle } from "./ui";
+import { EmptyState, ErrorNote, PageHeader, SectionTitle, Tag } from "./ui";
 
 const API = (import.meta as any).env?.VITE_API ?? "";   // 빈 값 = 같은 오리진(개발은 vite 프록시)
 
@@ -34,6 +34,48 @@ function useEndpoint<T>(path: string, rev = 0) {
   }, [path, rev, tick]);
   const reload = useCallback(() => setTick((n) => n + 1), []);
   return { data, error, loading, reload };
+}
+
+
+/** 레버 = 그 원인을 고칠 수 있는 손잡이. 원인만 세면 대시보드에서 끝나고,
+ *  레버까지 알아야 무엇을 할지가 정해진다. 서버(draft_feedback.LEVERS)와 같은 값. */
+const LEVER_KO: Record<string, string> = {
+  retrieval: "검색", generation: "생성", knowledge: "지식",
+  presentation: "표현", other: "기타",
+};
+const LEVER_HINT: Record<string, string> = {
+  retrieval: "근거 검색이 틀렸다 → 게이트·랭킹 파라미터를 동결 평가셋에 검증 후 적용",
+  generation: "근거는 맞는데 글이 틀렸다 → 프롬프트 규칙 자동 주입 + 평가셋 보강",
+  knowledge: "KB 에 답이 없거나 낡았다 → 사람이 RCA 작성·폐기",
+  presentation: "내용은 맞고 형식이 틀렸다 → 검증기 규칙으로 승인 전 차단",
+  other: "위 분류에 해당하지 않음",
+};
+
+/** 비율(0~1)을 퍼센트 문자열로. null 은 표본이 없다는 뜻이라 0% 로 쓰면 거짓말이 된다. */
+function pct(v: number | null | undefined): string {
+  return typeof v === "number" ? `${Math.round(v * 100)}%` : "—";
+}
+
+/** 임계 두 개로 색을 정한다 — 낮으면 빨강, 중간 주황, 높으면 초록. */
+function rateTone(v: number | null | undefined, bad: number, good: number):
+    "neutral" | "good" | "warn" | "bad" {
+  if (typeof v !== "number") return "neutral";
+  if (v < bad) return "bad";
+  if (v < good) return "warn";
+  return "good";
+}
+
+function trendLabel(t: any): string {
+  if (!t?.enough_data) return "—";
+  const d = Math.round((t.delta ?? 0) * 100);
+  return `${d > 0 ? "+" : ""}${d}%p`;
+}
+
+function trendTone(t: any): "neutral" | "good" | "warn" | "bad" {
+  if (!t?.enough_data) return "neutral";
+  if ((t.delta ?? 0) <= -0.1) return "bad";
+  if ((t.delta ?? 0) > 0) return "good";
+  return "neutral";
 }
 
 function Card({ title, hint, wide, children, error, loading, onRetry }: {
@@ -66,6 +108,10 @@ export default function Dashboard({ onOpenIssue, can }: {
   /** 기능 권한 확인 — 권한 없는 조작 버튼은 아예 그리지 않는다(헛클릭 방지). */
   can: (cap: string) => boolean;
 }) {
+  // VOC 에이전트의 헤드라인 지표 — 초안이 사람 손을 안 타고 나갔는가.
+  const draft = useEndpoint<any>("/rca/draft-feedback");
+  const sources = useEndpoint<any>("/knowledge/sources");
+
   const reco = useEndpoint<any>("/reco/stats");
   const quality = useEndpoint<any>("/knowledge/quality");
   const clusters = useEndpoint<any>("/knowledge/clusters?threshold=0.80&min_size=2");
@@ -111,10 +157,106 @@ export default function Dashboard({ onOpenIssue, can }: {
 
   return (
     <div className="h-full overflow-y-auto bg-zinc-950 px-6 pb-10 pt-8 sm:px-8">
-      <PageHeader title="지식 현황"
-        description="KB 구성·품질·중복·모순·공백·효능 — 추천 품질을 좌우하는 지식 자산의 상태" />
+      <PageHeader title="VOC 답변 현황"
+        description="초안 품질(고객에게 나가는 답변) + 그 답변을 떠받치는 지식 자산의 상태" />
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+        {/* 초안 품질 — VOC 에이전트의 헤드라인. 다른 카드는 전부 '중간 과정'을 보지만
+            이것만 최종 산출물(고객에게 나가는 답변)의 성패를 본다. 그래서 맨 앞이다. */}
+        <Card title="초안 품질" wide
+          hint="사람이 손대지 않고 게시된 비율 — 이 서비스가 실제로 잘하고 있는지의 1차 지표"
+          loading={draft.loading} error={draft.error} onRetry={draft.reload}>
+          {(draft.data?.stats?.judged ?? 0) === 0 ? (
+            <EmptyState message="아직 판정된 초안이 없습니다. 승인 대기 화면에서 초안을 승인·거부하면 여기에 쌓입니다." />
+          ) : (
+            <>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">
+                <StatTile label="무수정 게시" value={pct(draft.data.stats.clean_rate)}
+                  tone={rateTone(draft.data.stats.clean_rate, 0.5, 0.75)}
+                  sub={`${draft.data.stats.accepted_clean}건`}
+                  title="초안 그대로 Jira 에 나간 비율 — 진짜 품질 지표" />
+                <StatTile label="게시율" value={pct(draft.data.stats.accept_rate)}
+                  tone={rateTone(draft.data.stats.accept_rate, 0.7, 0.9)}
+                  sub={`거부 ${draft.data.stats.rejected}건`}
+                  title="거부되지 않고 게시까지 간 비율" />
+                <StatTile label="사람 수정" value={draft.data.stats.edited}
+                  sub={`판정 ${draft.data.stats.judged}건`}
+                  title="게시는 됐지만 사람이 고친 건수" />
+                <StatTile label="추세" value={trendLabel(draft.data.trend)}
+                  tone={trendTone(draft.data.trend)}
+                  sub={draft.data.trend?.enough_data
+                    ? `최근 ${draft.data.trend.window}건 기준` : "표본 부족"}
+                  title="최근 구간의 무수정 게시율이 그 이전보다 오르고 있는가" />
+              </div>
+
+              <div className="grid gap-4 lg:grid-cols-2">
+                <div>
+                  <div className="text-[11px] text-zinc-400 mb-1.5">
+                    결함 원인 — 레버별로 고치는 방법이 다르다
+                  </div>
+                  <BarList labelW={132}
+                    items={(draft.data.stats.by_cause ?? []).slice(0, 6).map((c: any) => ({
+                      label: c.label, value: c.count,
+                      hint: `${c.label} — 레버: ${LEVER_KO[c.lever] ?? c.lever}`,
+                    }))}
+                    emptyText="분류된 원인이 아직 없습니다" />
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {Object.entries(draft.data.stats.by_lever ?? {})
+                      .sort((a: any, b: any) => b[1] - a[1])
+                      .map(([lv, n]: any) => (
+                        <Tag key={lv} title={LEVER_HINT[lv] ?? ""}>
+                          {LEVER_KO[lv] ?? lv} {n}
+                        </Tag>
+                      ))}
+                  </div>
+                </div>
+
+                <div>
+                  <div className="text-[11px] text-zinc-400 mb-1.5">
+                    실패율 높은 고장군 — 여기부터 손대면 된다
+                  </div>
+                  <BarList labelW={148} unit="%"
+                    items={(draft.data.by_class ?? []).slice(0, 6).map((c: any) => ({
+                      label: c.template || "(미분류)",
+                      value: Math.round((c.failure_rate ?? 0) * 100),
+                      hint: `판정 ${c.judged}건 · 거부 ${c.rejected} / 수정 ${c.edited}`
+                        + (c.top_causes?.[0] ? ` · 최다 원인 ${c.top_causes[0].cause}` : ""),
+                    }))}
+                    max={100} emptyText="클래스별 집계가 아직 없습니다" />
+                  <div className="mt-2 text-[11px] text-zinc-500">
+                    막대는 거부·수정 비율(%). 원인이 2회 이상 모이면 다음 초안의 생성 규칙에
+                    자동 반영되고, 개선 큐에 레버별 조치가 올라간다.
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
+        </Card>
+
+        {/* KB 원천 — 무엇이 지식베이스를 이루는가(Jira 미러 + 보조 원천) */}
+        <Card title="KB 원천" hint="지식베이스를 이루는 파일과 각각의 근거 기여량"
+          loading={sources.loading} error={sources.error} onRetry={sources.reload}>
+          <div className="grid grid-cols-3 gap-2 mb-3">
+            <StatTile label="적재 총계" value={sources.data?.total ?? "—"}
+              sub="중복 제거 후" title="파일별 건수를 더한 값과 다르면 키가 겹친 것이다" />
+            <StatTile label="해결(근거)" value={sources.data?.resolved ?? "—"} sub="검색 대상" />
+            <StatTile label="큐레이션" value={sources.data?.curated_in_live ?? "—"}
+              sub="승인 RCA 환류" title="사람이 승인·수정해 KB 에 되돌아온 분석" />
+          </div>
+          <BarList labelW={150}
+            items={(sources.data?.sources ?? []).map((x: any) => ({
+              label: `${x.key_prefixes?.[0] ?? x.path} (${x.kind === "jira_mirror" ? "미러" : "보조"})`,
+              value: x.resolved,
+              hint: `${x.path} — 전체 ${x.total}건 / 해결 ${x.resolved}건`,
+            }))}
+            emptyText="원천 정보 없음" />
+          {(sources.data?.missing_sources ?? []).length > 0 && (
+            <div className="mt-2 text-[11px] text-amber-400">
+              찾을 수 없는 원천: {sources.data.missing_sources.join(", ")}
+            </div>
+          )}
+        </Card>
+
         {/* KB 구성 */}
         <Card title="KB 구성" hint="분류별 해결 사례 분포" loading={reco.loading} error={reco.error}
           onRetry={reco.reload}>

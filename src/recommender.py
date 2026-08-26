@@ -16,10 +16,15 @@
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 
 import threading
+
+# 파생 임베딩 디스크 캐시가 담는 최대 텍스트 수(태그별). KB 가 바뀌며 낡은 항목이
+# 쌓이므로 상한을 둔다 — 이번 요청분을 먼저 지키고 남는 자리에 과거 항목을 채운다.
+_EMB_CACHE_MAX = int(os.getenv("RVP_EMB_CACHE_MAX", "50000"))
 
 from rank_bm25 import BM25Okapi
 
@@ -383,30 +388,61 @@ class Recommender:
         return np.asarray([mat[known[h]] for h in want], dtype=np.float32)
 
     def embed_cached(self, texts: list[str], tag: str):
-        """텍스트 묶음을 임베딩하되 **디스크에 캐시**한다(내용+모델 주소).
+        """텍스트 묶음을 임베딩하되 **텍스트 하나하나를 내용 주소로** 디스크에 캐시한다.
 
-        KB 문서 임베딩(_init_embed)과 같은 방식이다. 이걸 쓰지 않으면 파생 분석이
-        호출마다 KB 전체를 다시 임베딩한다 — 실제로 /knowledge/contradictions 가
-        매 호출 4.0~4.4초를 썼다(대시보드는 열 때마다 호출한다).
+        이걸 쓰지 않으면 파생 분석이 호출마다 KB 전체를 다시 임베딩한다 — 실제로
+        /knowledge/contradictions 가 매 호출 4.0~4.4초를 썼다.
+
+        **코퍼스 단위로 해시하면 안 된다.** 예전 구현은 캐시 키가
+        `md5(모든 텍스트를 이어붙인 것)` 이었다. 그래서 레코드가 **하나만** 바뀌어도
+        (RCA 승인 1건, Jira 폴링이 물어온 변경 1건) 전체 캐시가 무효가 되고 KB 전량을
+        다시 임베딩했다 — 실측 207건 7.3초. 대시보드는 KB 가 바뀔 때마다 그 값을 냈다.
+        텍스트별 주소로 두면 바뀐 것만 임베딩한다.
         """
         import hashlib
         from pathlib import Path
         np = self._np
+        if not texts:
+            return np.zeros((0, 1), dtype=np.float32)
         sig = self._model_name() + ("" if self.embed_backend == "fastembed" else f"@{self.embed_backend}")
-        digest = hashlib.md5(("\u0000".join(texts) + sig + tag).encode()).hexdigest()[:12]
-        cache = Path(__file__).resolve().parent.parent / "tmp_db" / f"emb_{tag}_{digest}.npz"
+        sig_digest = hashlib.md5((sig + tag).encode()).hexdigest()[:10]
+        cache = Path(__file__).resolve().parent.parent / "tmp_db" / f"embc_{tag}_{sig_digest}.npz"
+
+        def _h(t: str) -> str:
+            return hashlib.sha1(t.encode("utf-8")).hexdigest()
+
+        store: dict = {}
         if cache.exists():
             try:
-                return np.load(cache)["emb"]
+                z = np.load(cache, allow_pickle=False)
+                store = {k: v for k, v in zip(z["keys"].tolist(), z["emb"])}
             except Exception:
-                pass                       # 손상된 캐시는 무시하고 다시 만든다
-        emb = self._embed_texts(texts, is_query=False)
-        try:
-            cache.parent.mkdir(exist_ok=True)
-            np.savez_compressed(cache, emb=emb)
-        except OSError:
-            pass
-        return emb
+                store = {}                 # 손상된 캐시는 무시하고 다시 만든다
+
+        hashes = [_h(t) for t in texts]
+        missing_idx = {h: i for i, h in enumerate(hashes) if h not in store}
+        if missing_idx:
+            # 중복 텍스트는 한 번만 임베딩한다 — KB 에 같은 문구가 반복되는 것은 흔하다.
+            order = list(missing_idx.values())
+            fresh = self._embed_texts([texts[i] for i in order], is_query=False)
+            for h, vec in zip(missing_idx.keys(), np.asarray(fresh, dtype=np.float32)):
+                store[h] = vec
+            try:
+                # 무한 증가 방지: 이번 요청분을 먼저 지키고, 남는 자리에 과거 항목을 채운다.
+                keep = dict.fromkeys(hashes)
+                merged = {h: store[h] for h in keep if h in store}
+                for h, v in store.items():
+                    if len(merged) >= _EMB_CACHE_MAX:
+                        break
+                    merged.setdefault(h, v)
+                cache.parent.mkdir(exist_ok=True)
+                tmp = cache.with_name(cache.name + ".tmp.npz")
+                np.savez_compressed(tmp, keys=np.array(list(merged), dtype="U40"),
+                                    emb=np.asarray(list(merged.values()), dtype=np.float32))
+                os.replace(tmp, cache)     # 원자적 교체 — 동시 요청이 반쯤 쓴 파일을 읽지 않게
+            except OSError:
+                pass
+        return np.asarray([store[h] for h in hashes], dtype=np.float32)
 
     def _cos_all(self, q: str):
         """질의 vs KB 전체 코사인 유사도 배열 (강도 신호).
