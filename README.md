@@ -222,6 +222,97 @@ HTTP 직접 호출)** 단일 엔진으로 생성한다. 모델·엔드포인트�
 환경변수: `RVP_PREWARM`(0=끔) · `RVP_PREWARM_LIMIT`(기본 20) ·
 `RVP_PREWARM_GAP_SEC`(기본 1.0) · `RVP_LLM_CACHE_TTL`(0=무기한)
 
+### 초안 거부·수정 원인 분류 → 자기개선 loop
+
+**VOC 답변 성능을 올리는 유일한 직접 신호는 "사람이 그 초안을 어떻게 판정했는가" 다.**
+예전에는 그 신호가 두 곳에서 버려졌다 — `/rca/reject` 는 상태만 뒤집었고,
+`/rca/approve` 는 `edited: bool` 만 남겼다. 무엇이 왜 틀렸는지 몰라 다음 초안이 같은
+실수를 반복했고, 자기개선 loop 의 신호원(군집·모순·공백·비유용) 중 **최종 산출물의
+실패를 보는 것이 하나도 없었다**.
+
+`src/draft_feedback.py` 가 판정을 **닫힌 분류 체계**로 축적한다. 자유 서술만 쌓으면
+집계가 안 되고, 집계가 안 되면 loop 가 돌지 않는다.
+
+원인 13종은 전부 **레버**에 매핑된다 — 이게 핵심이다. "무엇이 틀렸나"만 세면
+대시보드에서 끝나지만, "어느 손잡이를 돌려야 하나"까지 알면 액션이 나온다.
+
+| 레버 | 원인(예) | loop 가 만드는 액션 |
+|---|---|---|
+| `retrieval` | 근본원인이 틀림, 근거 무관, 질문 요지 빗나감 | 게이트·랭킹 파라미터 shadow 평가(L2) 후 적용 |
+| `generation` | 환각, 인용 키 오류, 얕음, 조치 없음 | 프롬프트 규칙 **자동 주입** + 평가셋 보강 |
+| `knowledge` | 사례 자체가 없음, 폐기 지식 참조 | RCA 작성·폐기 (사람, 기존 HITL 엔드포인트) |
+| `presentation` | 문체·형식·용어(한자 등) | 검증기 규칙으로 승인 전 차단 |
+
+**사람이 라벨을 안 달아도 신호를 잃지 않는다.** `classify_diff()` 가 (원본→최종) 차이에서
+원인을 추정한다 — 인용 삭제→`bad_citation`, 근본원인 섹션 재작성→`wrong_root_cause`,
+번호 단계 추가→`missing_action`, `(추정)` 추가→`unsupported_claim`. 추정은
+`origin: "auto"` 로 표시해 사람 라벨(`human`)과 **절대 섞지 않는다** — 섞으면 근거의
+신뢰도를 알 수 없다.
+
+환류는 두 방향이다:
+- **생성**: 같은 고장 클래스에서 **2회 이상** 반복된 지적이 다음 초안의 프롬프트 규칙이
+  된다(`prompt_guidance`). 1회는 규칙이 되지 않는다 — 노이즈가 규칙이 되면 프롬프트가
+  한 사람의 취향으로 흘러간다. 전역 폴백도 없다(무관 클래스 지적 주입 방지).
+- **거버넌스**: 원인이 모이면 `improve_queue` 에 레버별 제안이 올라간다. 최다 원인이
+  1회뿐이면 레버를 지목하지 않고 "원인이 흩어져 있으니 사람이 라벨을 달아라" 로 낸다.
+
+측정 지표는 `clean_rate`(손대지 않고 게시된 비율)와 `accept_rate`(거부되지 않은 비율).
+무수정 승인도 기록한다 — **분모가 없으면 개선율을 계산할 수 없다**. 두 지표는
+`self_improve` 의 핵심지표·드리프트·리포트에 들어가 회차별 추세로 보인다.
+
+```sh
+# 대시보드(원인 분포·클래스별 실패율·추세·분류 체계)
+curl localhost:8011/rca/draft-feedback
+.venv/bin/python tests/test_draft_feedback.py     # 41개
+```
+
+### VOC 목 데이터로 loop 검증
+
+기존 `data/all_raw_issues.json` 은 **엔지니어가 쓴 고장 보고서**다. 이 서비스가 실제로
+답해야 하는 건 **고객이 Jira 로 올린 VOC** — 짧고, 증상 대신 체감을 말하고, "왜 이러냐/
+언제 고쳐지냐" 가 섞인다. loop 는 loop 가 마주칠 입력으로 재야 한다.
+
+`scripts/build_voc_mock.py` 가 고장 템플릿 8종을 **해결 사례(엔지니어 표현)** 와
+**미해결 VOC(고객 표현)** 양쪽으로 뽑아 `data/all_raw_issues.json` 과 동일 스키마로
+낸다. 프로젝트 키는 `VOC-` 로 분리해 실제 데이터와 섞이지 않는다.
+
+`scripts/validate_draft_loop.py` 가 초안에 **알려진 결함을 주입**하고 사람이 할 법한
+수정을 적용해, 자동 분류가 **주입한 원인을 되찾는지** 잰다. 정답 없이 "돌아간다" 만
+확인하는 검증은 무의미하기 때문이다.
+
+```sh
+.venv/bin/python scripts/build_voc_mock.py --count 96
+.venv/bin/python scripts/validate_draft_loop.py     # --write 로 실제 저장소 적재
+```
+
+실측(2026-08-26, 96건 / 질의 32건, 로컬 임베딩 fastembed):
+
+| 단계 | 결과 |
+|---|---|
+| 검색 P@1 · coverage | **32/32** · **32/32** (`hybrid_embed`) |
+| 자동 분류 복원율 | **24/24 (1.0)**, 오분류 0 |
+| 환류 | 프롬프트 가이던스 2클래스 · 개선 제안 7건(4유형) |
+
+방법별 P@1 (같은 목 데이터, rerank OFF):
+
+| method | P@1 (KB 32) | P@1 (KB 64) |
+|---|---|---|
+| bm25 | 0.875 | 0.875 |
+| graph | 1.0 | 1.0 |
+| hybrid · hybrid_embed | **1.0** | **1.0** |
+
+> BM25 가 놓치는 2건은 전부 같은 유형이다 — "사진 연사로 찍으면 앱이 잠깐씩 멈춥니다"
+> (KB: "버스트 쓰기 중 write latency spike"), "무선충전 거치대에 올려두면 교통카드가
+> 안 찍힙니다"(KB: "WLC 충전 중 polling loop 지연"). 고객이 **증상 대신 체감**을
+> 말하면 어휘가 겹치지 않아 어휘 매칭이 무너진다. KB 를 2배로 늘려도 0.875 그대로였다
+> — 표본 부족이 아니라 표현 격차다.
+
+이 하네스가 실제 결함 하나를 잡았다: 제목의 한자만 고쳐도(`예상 근본원인` →
+`예상 根本原因`) 섹션 추출이 한쪽에서 실패해 `similarity 0.0` 이 나왔고, 형식 손질이
+**`wrong_root_cause`(P1 retrieval 신호)** 로 오진됐다. 그대로 뒀으면 loop 가 오타
+하나 때문에 검색 파라미터를 튜닝하러 갔을 것이다. 회귀 테스트로 고정했다
+(`test_heading_change_is_not_a_content_defect`).
+
 ## 구조
 
 ```
@@ -239,11 +330,15 @@ src/
   recommender.py        해결책 추천기 (graph/bm25/hybrid/embed)
   eval_recommender.py   P@1/P@3/MRR 평가 하네스
   jira_commenter.py     Jira 댓글 조회/게시 (사람 검토 승인 후 사용)
+  draft_feedback.py     초안 거부·수정 원인 분류 축적 → 프롬프트/개선 큐 환류
+  self_improve.py       측정(L1)·파라미터 shadow 평가(L2)·지식 변경 제안(L3)
   agent.py, retrievers.py, lang_validator.py, ...  (평가/실험용 유틸)
 scripts/
   run_pipeline.py       ingest→preprocess→explorer 오케스트레이션
   jira_webhook_register.py  Jira 웹훅 등록/목록/해제 (공개 URL 필요, 폴링이 기본)
   jira_seed.py          가짜 고장 이슈 Jira 시드 생성기 (--set lsi|nfc|nfc2)
+  build_voc_mock.py     VOC 성격 목 Jira 데이터 (고객 표현 질의 + 해결 사례)
+  validate_draft_loop.py  초안 개선 loop 엔드투엔드 검증 (결함 주입 → 복원율)
   lsi_failure_data.py   칩 11라인 × (LSI 24종 + NFC Forum 프로토콜 14종) 고장 시나리오
                         NFC 배치: NCI 2.3/Digital 2.4/LLCP 1.4/SNEP/Type 2·3·4·5 Tag/
                         TNEP/WLC 2.0/Smart Poster RTD/NFC Auth Protocol/Connection Handover

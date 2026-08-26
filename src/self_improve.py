@@ -34,6 +34,7 @@ def _safe(fn, default=None):
 
 def snapshot(records: list[dict] | None = None) -> dict:
     """모든 측정 신호를 한 번에 수집. records 미지정 시 KB 스냅숏 로드."""
+    import draft_feedback
     import quality_gate
     import reco_feedback
     import knowledge_gaps
@@ -54,6 +55,11 @@ def snapshot(records: list[dict] | None = None) -> dict:
     return {
         "ts": now_iso(),
         "reco_feedback": _safe(reco_feedback.stats, {}),
+        # 초안 결함 — 최종 산출물(고객에게 나가는 답변)이 실패한 신호. 다른 신호가
+        # 전부 '중간 과정'을 보는 반면 이것만 결과를 본다.
+        "draft_feedback": _safe(draft_feedback.stats, {}),
+        "draft_classes": _safe(lambda: draft_feedback.by_class()[:10], []),
+        "draft_trend": _safe(draft_feedback.trend, {}),
         "kb_quality": {"ok": quality.get("ok"), "violations": quality.get("violations", []),
                        "fill": (quality.get("report") or {}).get("fill", {}),
                        "deficient": len((quality.get("report") or {}).get("deficient_resolved_keys", []))},
@@ -72,6 +78,29 @@ def snapshot(records: list[dict] | None = None) -> dict:
 def recommendations(snap: dict) -> list[dict]:
     """신호 → 우선순위 개선 액션(진단). L1은 제안만, 실행은 L2/L3."""
     out = []
+    # 초안 품질이 최우선 진단이다 — 고객에게 나가는 답변의 성능을 직접 재는 유일한 지표.
+    df = snap.get("draft_feedback", {})
+    judged, clean = df.get("judged", 0), df.get("clean_rate")
+    if judged >= 5 and clean is not None and clean < 0.5:
+        # 레버별로 액션이 다르므로 최다 레버를 진단에 박아 둔다 — "품질이 나쁘다"만
+        # 말하는 진단은 손댈 데가 없어 아무도 움직이지 않는다.
+        lev = sorted((snap.get("draft_feedback", {}).get("by_lever") or {}).items(),
+                     key=lambda x: -x[1])
+        top_lev = lev[0][0] if lev else "?"
+        top_cause = (df.get("by_cause") or [{}])[0]
+        out.append({"priority": "P1", "area": "초안 품질",
+                    "action": (f"무수정 승인율 {clean} < 0.5 (판정 {judged}건) — 최다 원인 "
+                               f"'{top_cause.get('label', '?')}' ({top_cause.get('count', 0)}회), "
+                               f"주 레버 '{top_lev}'. 개선 큐의 해당 제안부터 처리 권장")})
+    if judged >= 5 and df.get("accept_rate") is not None and df["accept_rate"] < 0.7:
+        out.append({"priority": "P1", "area": "초안 거부율",
+                    "action": (f"초안 거부율 {round(1 - df['accept_rate'], 3)} — 게시조차 못 하는 "
+                               f"초안이 많다. 거부 사유 상위 항목을 /rca/draft-feedback 에서 확인")})
+    dt = snap.get("draft_trend", {})
+    if dt.get("enough_data") and dt.get("delta", 0) < -0.1:
+        out.append({"priority": "P1", "area": "초안 품질 추세",
+                    "action": (f"무수정 승인율이 {dt['clean_rate_prev']} → {dt['clean_rate_curr']} "
+                               f"로 하락({dt['delta']}) — 최근 변경(프롬프트/파라미터/KB)의 회귀 의심")})
     fb = snap.get("reco_feedback", {})
     rate = fb.get("helpful_rate")
     if rate is not None and rate < 0.7 and fb.get("total", 0) >= 5:
@@ -109,8 +138,13 @@ def _load_history() -> list:
 
 def _key_metrics(snap: dict) -> dict:
     fb = snap.get("reco_feedback", {})
+    df = snap.get("draft_feedback", {})
     return {
         "ts": snap.get("ts"),
+        # 초안 KPI — VOC 답변 성능의 1차 지표(사람이 손대지 않고 나갔는가)
+        "draft_clean_rate": df.get("clean_rate"),
+        "draft_accept_rate": df.get("accept_rate"),
+        "draft_judged": df.get("judged", 0),
         "helpful_rate": fb.get("helpful_rate"),
         "feedback_total": fb.get("total", 0),
         "roi_queries": fb.get("actual_root_cause_queries", 0),
@@ -126,7 +160,8 @@ def _drift(curr: dict, prev: dict | None) -> dict:
     if not prev:
         return {"first_run": True}
     d = {}
-    for k in ("helpful_rate", "feedback_total", "roi_queries", "gap_events", "curated", "known_issues"):
+    for k in ("draft_clean_rate", "draft_accept_rate", "draft_judged",
+              "helpful_rate", "feedback_total", "roi_queries", "gap_events", "curated", "known_issues"):
         a, b = curr.get(k), prev.get(k)
         if isinstance(a, (int, float)) and isinstance(b, (int, float)):
             d[k] = round(a - b, 3)
@@ -156,7 +191,10 @@ def _write_report(result: dict) -> Path:
     path = REPORT_DIR / f"selfcheck_{ts}.md"
     lines = [f"# 자기 개선 점검 — {snap['ts']}", "",
              "## 핵심 지표", "| 지표 | 값 | 직전 대비 |", "|---|---|---|"]
-    for k, label in (("helpful_rate", "추천 유용성"), ("roi_queries", "ROI(실제RC 질의)"),
+    for k, label in (("draft_clean_rate", "초안 무수정 승인율"),
+                     ("draft_accept_rate", "초안 게시율"),
+                     ("draft_judged", "초안 판정 건수"),
+                     ("helpful_rate", "추천 유용성"), ("roi_queries", "ROI(실제RC 질의)"),
                      ("gap_events", "지식 공백 이벤트"), ("curated", "큐레이션 지식"),
                      ("known_issues", "고장모드 기사")):
         dv = drift.get(k)
@@ -278,6 +316,15 @@ def suggest(reco=None, records: list[dict] | None = None) -> list[dict]:
     각 제안: {type, priority, target, rationale, evidence, action_hint}.
     """
     out = []
+
+    # 0) 초안 거부/수정 원인 → 레버별 개선 제안. **다른 어떤 신호보다 직접적이다** —
+    #    군집·모순·공백은 "KB 가 이럴 것이다" 를 보지만, 이건 사람이 실제로 나가는
+    #    답변을 보고 내린 판정이다.
+    try:
+        import draft_feedback
+        out.extend(draft_feedback.suggestions())
+    except Exception:
+        pass
 
     # 1) 미승격 고장모드 군집 → Known-Issue 기사 승격 제안(중복 사례 정리)
     #

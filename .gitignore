@@ -32,3 +32,6 @@ data/jira_import.csv
 claudedocs/self_improve/
 data/jira_sync_state.json
 data/users.yaml
+
+# 테스트가 매 실행마다 재생성하는 픽스처(소스 아님)
+tests/_users_test.yaml
