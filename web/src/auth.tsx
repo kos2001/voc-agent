@@ -119,7 +119,7 @@ export function LoginScreen({ cfg, onDone }: { cfg: AuthConfig | null; onDone: (
   return (
     <div className="flex h-full items-center justify-center bg-zinc-950 px-4">
       <div className="w-full max-w-sm">
-        <h1 className="text-2xl font-semibold tracking-tight text-zinc-50">LSI 불량 분석</h1>
+        <h1 className="text-2xl font-semibold tracking-tight text-zinc-50">VOC Agent</h1>
         <p className="mt-1.5 text-sm text-zinc-300">
           계속하려면 로그인이 필요합니다.
         </p>

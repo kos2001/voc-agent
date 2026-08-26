@@ -78,11 +78,11 @@ function Shell() {
       <nav className="flex shrink-0 items-center gap-1 border-b border-zinc-800 bg-zinc-950 px-4 h-14">
         <button onClick={() => go({ view: "app" })} title="홈(분석 화면)으로"
           className="mr-4 text-left outline-none focus-visible:ring-1 focus-visible:ring-sky-500 rounded">
-          <span className="block text-sm font-semibold tracking-tight text-zinc-50">LSI 불량 분석</span>
-          <span className="block text-[11px] text-zinc-400">과거 해결 사례 기반 근본원인 추천</span>
+          <span className="block text-sm font-semibold tracking-tight text-zinc-50">VOC Agent</span>
+          <span className="block text-[11px] text-zinc-400">고객 문의(VOC) 답변 — 과거 해결 사례 기반</span>
         </button>
         {navItem("app", "◎", "분석", "미해결 이슈의 근본원인·해결책 추천")}
-        {status?.ready && navItem("dashboard", "▤", "지식 현황", "KB 구성·품질·중복·모순·공백·효능")}
+        {status?.ready && navItem("dashboard", "▤", "VOC 답변 현황", "초안 품질(무수정 게시율·결함 원인) + KB 구성·품질·공백")}
         {status?.ready && !showOnboarding && (
           <div className="ml-auto flex items-center gap-1">
             {can("rca.read") && navItem("rca", "↗", "승인 대기", "RCA 댓글 승인 대기 (HITL)",
