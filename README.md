@@ -1,17 +1,23 @@
-# LSI Error Analysis
+# VOC Agent
 
-LSI 칩/펌웨어 고객 고장 분석 어시스턴트. **과거에 해결된 이슈(Jira)를 지식베이스로,
-진행 중이거나 시작 전인 미해결 이슈의 root-cause와 해결책을 자동 제안**한다.
-시니어 엔지니어의 분석 경험을 그래프/검색 기반으로 재사용해 주니어 엔지니어를 지원하는 것이 목표.
+**Jira 로 들어오는 고객 문의(VOC)에 답하는 어시스턴트.** 과거에 해결된 이슈를
+지식베이스로, 미해결 문의의 근본원인·해결책 초안을 만들어 **사람이 승인할 때만**
+Jira 에 게시한다. 도메인은 LSI 칩/펌웨어 고장 분석이다.
+
+목표는 그 **답변의 성능을 계속 올리는 것**이다. 그래서 초안이 거부·수정될 때마다
+원인을 분류해 쌓고(`src/draft_feedback.py`), 그 원인이 다음 초안의 생성 규칙과
+개선 큐로 되돌아가는 닫힌 루프를 돈다.
 
 ## 무엇을 하나
 
-1. **Jira 적재(ingest)** — LSI 프로젝트의 고장 이슈를 REST로 가져온다.
+1. **Jira 적재(ingest)** — 고장 이슈·고객 문의를 REST로 가져온다.
 2. **전처리(preprocess)** — 칩/분류/증상/근본원인/해결책/엔티티를 추출하고,
    엔티티↔이슈 bipartite **지식 그래프**(networkx)를 만든다.
-3. **탐색·추천(explorer / recommender)** — 미해결 이슈의 관찰 가능한 정보(요약·증상·칩·분류)로
+3. **탐색·추천(explorer / recommender)** — 미해결 문의의 관찰 가능한 정보(요약·증상·칩·분류)로
    유사한 *해결된* 이슈를 검색하고, 그 근본원인/해결책을 제안한다. (옵션: LLM 종합 설명)
-4. **프론트엔드** — 미해결 이슈를 고르면 과거 해결 사례 + 제안 근본원인/해결책/신뢰도를 보여준다.
+4. **초안 → HITL 승인 → 게시** — 사람이 승인·수정·거부하고, 그 판정이 신호로 쌓인다.
+5. **자기개선 loop** — 쌓인 판정으로 측정(L1)·파라미터 검증(L2)·지식 변경 제안(L3).
+6. **프론트엔드** — 미해결 문의를 고르면 과거 해결 사례 + 제안 근본원인/해결책/신뢰도.
 
 ## 검색 성능 (eval)
 
@@ -313,6 +319,47 @@ curl localhost:8011/rca/draft-feedback
 하나 때문에 검색 파라미터를 튜닝하러 갔을 것이다. 회귀 테스트로 고정했다
 (`test_heading_change_is_not_a_content_defect`).
 
+### KB 원천 — 지식 현황
+
+이 서비스가 답해야 하는 대상이 VOC 로 옮겨가면서 KB 에 Jira 미러 말고 다른 원천이
+들어와야 했다. 그런데 원천 경로가 `backend/server.py`·`src/self_improve.py`·평가
+스크립트에 각각 하드코딩돼 있어, 한 곳만 바꾸면 **서버와 자기개선 loop 가 다른 KB 를
+본다** — 이 저장소가 이미 한 번 당한 실패다(대시보드 "모순 없음" vs 개선 큐 "모순 1건").
+`src/kb_source.py` 가 단일 소스다.
+
+**Jira 미러에 직접 섞으면 안 된다.** `src/jira_sync.py` 는 `removed = known - live` 로
+삭제를 대조하는데 `known` 이 `all_raw_issues.json` 의 전체 키다. Jira 에 없는 키
+(`VOC-1` 등)를 미러에 넣으면 **다음 대조 회차에 전부 삭제된다**. 미러는 jira_sync 가
+소유하는 파일이고, 보조 지식은 별도 파일로 두고 읽을 때만 합친다.
+
+```sh
+RVP_KB_EXTRA=data/voc_mock_issues.json    # 콤마 구분, ROOT 상대 또는 절대 경로
+curl localhost:8011/knowledge/sources      # 원천별 현황
+```
+
+- 키가 겹치면 **미러가 이긴다**(Jira 가 정본, 보조는 보강). 보조끼리 겹치면 목록 순서.
+- 합계는 **중복 제거 후 실제 적재 기준**이다. 파일별 건수를 더한 값과 다르면 키가 겹친
+  것이고, 지식 '현황' 이 실제 적재량과 다르면 그 화면은 신뢰를 잃는다.
+- 없는 경로는 조용히 빠지지 않고 `missing_sources` 로 드러난다.
+- `live` 는 서빙 중인 KB 와의 대조다 — 설정만 바꾸고 캐시를 무효화하지 않으면 갈라진다.
+
+현재 적재(VOC 목 데이터 연결 시):
+
+| 원천 | 건수 | 해결(근거) |
+|---|---|---|
+| `data/all_raw_issues.json` (Jira 미러) | 264 | 137 |
+| `data/voc_mock_issues.json` (보조) | 96 | 64 |
+| **합계**(중복 제거) | **360** | **201** (+ 큐레이션 6) |
+
+**VOC 지식이 실제로 근거로 쓰이는가** — VOC 질의 32건 기준 top-1 근거의 24건, top-3
+근거의 76/96 이 VOC 사례다. 나머지는 LSI 미러에 더 맞는 실제 사례가 있는 경우로
+(UFS latency·thermal throttle 처럼 겹치는 고장모드), 원천을 가리지 않고 더 나은 근거를
+고른 결과다 — 원천별 분리가 아니라 통합 검색이 맞는 동작이다.
+
+```sh
+.venv/bin/python tests/test_kb_source.py   # 16개
+```
+
 ## 구조
 
 ```
@@ -330,6 +377,7 @@ src/
   recommender.py        해결책 추천기 (graph/bm25/hybrid/embed)
   eval_recommender.py   P@1/P@3/MRR 평가 하네스
   jira_commenter.py     Jira 댓글 조회/게시 (사람 검토 승인 후 사용)
+  kb_source.py          KB 원천 단일 소스 (Jira 미러 + RVP_KB_EXTRA 보조 원천)
   draft_feedback.py     초안 거부·수정 원인 분류 축적 → 프롬프트/개선 큐 환류
   self_improve.py       측정(L1)·파라미터 shadow 평가(L2)·지식 변경 제안(L3)
   agent.py, retrievers.py, lang_validator.py, ...  (평가/실험용 유틸)

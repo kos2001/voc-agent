@@ -62,7 +62,15 @@ def test_no_false_positives() -> None:
     out = mark(md, ["LSI-90"])
     check("접두 일치로 오탐 없음", out == md, out)
     check("빈 목록이면 무변경", mark(md, []) == md)
-    check("형식 밖 키는 무시", mark("ABC-1 참조", ["ABC-1"]) == "ABC-1 참조")
+    # 키 판정은 issue_keys 가 단일 소스다. 예전에는 `LSI-\d+` 로 하드코딩돼 있어
+    # 다른 프로젝트 키(VOC-1 등)가 전부 "형식 밖"으로 무시됐다 — KB 에 VOC 원천이
+    # 들어오자 인용 검증 전체가 조용히 무력화되는 버그였다.
+    check("다른 프로젝트 키도 정상 처리", mark("VOC-1 참조", ["VOC-1"]) == "VOC-1(미제공) 참조",
+          mark("VOC-1 참조", ["VOC-1"]))
+    # 가드의 취지는 유지: 키 형태가 아닌 문자열은 손대지 않는다.
+    for junk in ("PM9C3-NVMe", "HS-G4", "ISO-DEP", "not-a-key"):
+        check(f"키 형태가 아니면 무시 ({junk})",
+              mark(f"{junk} 참조", [junk]) == f"{junk} 참조", mark(f"{junk} 참조", [junk]))
 
 
 def test_idempotent() -> None:
@@ -143,7 +151,13 @@ def test_example_key_does_not_leak() -> None:
     recs = [{"key": "LSI-77"}, {"key": "LSI-88"}]
     check("근거의 첫 키를 예시로", server._example_key(recs) == "LSI-77",
           server._example_key(recs))
-    check("근거가 없으면 자리표시자", server._example_key([]) == "LSI-000")
+    # 자리표시자는 JIRA_PROJECT_KEY 를 따른다 — 여기서 "LSI-000" 을 기대하면
+    # 다른 프로젝트를 쓰는 사람에게서 깨진다(테스트가 .env 에 묶인다).
+    import issue_keys
+    check("근거가 없으면 자리표시자", server._example_key([]) == issue_keys.placeholder(),
+          server._example_key([]))
+    check("자리표시자는 실제 키처럼 보이지 않는다(-000)",
+          issue_keys.placeholder().endswith("-000"), issue_keys.placeholder())
 
 
 if __name__ == "__main__":

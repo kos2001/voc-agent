@@ -37,7 +37,13 @@ import preprocess               # noqa: E402
 from recommender import Recommender, template_key  # noqa: E402
 
 MOCK = ROOT / "data" / "voc_mock_issues.json"
-TPL_COUNT = 8   # build_voc_mock.TEMPLATES 길이 — 정답 템플릿 판정용
+
+# 정답 템플릿 개수는 생성기에서 가져온다 — 숫자를 여기 박아두면 생성기에 템플릿을
+# 추가하는 순간 정답 판정이 조용히 어긋나고, P@1 이 틀린 채로 초록을 낸다.
+sys.path.insert(0, str(ROOT / "scripts"))
+from build_voc_mock import TEMPLATES as _VOC_TEMPLATES  # noqa: E402
+
+TPL_COUNT = len(_VOC_TEMPLATES)
 
 
 def _tpl_of(key: str) -> int:

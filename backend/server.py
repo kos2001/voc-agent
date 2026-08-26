@@ -54,6 +54,8 @@ import ontology  # noqa: E402
 import ownership  # noqa: E402
 import quality_gate  # noqa: E402
 import draft_feedback  # noqa: E402
+import issue_keys  # noqa: E402
+import kb_source  # noqa: E402
 import rca_feedback  # noqa: E402
 import rca_queue  # noqa: E402
 import reco_feedback  # noqa: E402
@@ -99,13 +101,15 @@ async def _lifespan(_app: FastAPI):
     _stop_jira_poller()
 
 
-app = FastAPI(title="LSI Failure Analysis API", lifespan=_lifespan)
+app = FastAPI(title="VOC Agent API", lifespan=_lifespan)
 
 # ---------------------------------------------------------------------------
 # 추천 엔진 (과거 해결 이슈 → 미해결 이슈의 root-cause/해결책 제안)
 # ---------------------------------------------------------------------------
 ALL_RAW = ROOT / "data" / "all_raw_issues.json"
-RESOLVED_STATUS = "완료"
+# 해결 상태는 kb_source 가 단일 소스(RVP_RESOLVED_STATUS). 여기서 다시 박으면
+# 서버와 KB 로더가 서로 다른 기준으로 '해결' 을 세게 된다.
+RESOLVED_STATUS = kb_source.RESOLVED_STATUS
 
 _RECO_STATE: dict = {}
 # 빌드 락 — 백그라운드 Jira 폴러가 무효화하고 요청 스레드가 재빌드하므로 경합이 잦다.
@@ -138,11 +142,13 @@ def _reco_state() -> dict:
 
 def _build_reco_state() -> dict:
     global _RECO_STATE
-    if not ALL_RAW.exists():
+    if not ALL_RAW.exists() and not kb_source.extra_paths():
         raise RuntimeError(
             "data/all_raw_issues.json 없음 — 먼저 실행: "
             ".venv/bin/python src/eval_recommender.py (또는 src/ingest.py --status all)")
-    raw = json.loads(ALL_RAW.read_text(encoding="utf-8"))
+    # KB 원천은 kb_source 가 단일 소스다(미러 + RVP_KB_EXTRA 보조 원천).
+    # 여기서 직접 파일을 읽으면 자기개선 loop 와 다른 KB 를 보게 된다.
+    raw = kb_source.raw_issues()
     records = [parse_issue(r) for r in raw]
     resolved = [r for r in records if r["status"] == RESOLVED_STATUS]
     unresolved = [r for r in records if r["status"] != RESOLVED_STATUS]
@@ -980,7 +986,7 @@ def mark_unsupported(md: str, dropped: list[str]) -> str:
     import re as _re
     marked = md
     for k in sorted(set(dropped), key=len, reverse=True):
-        if not _re.fullmatch(r"LSI-\d+(-\w+)?", str(k)):
+        if not issue_keys.is_key(k):
             continue                       # 예상 밖 형식이면 손대지 않는다
         # 이미 표시된 것/코드 블록(`...`)/링크 대상은 제외
         pat = _re.compile(rf"(?<![\w-]){_re.escape(k)}(?![\w-])(?!\(미제공\))")
@@ -1069,7 +1075,7 @@ def _strip_embedded_keys(text: str, keep: set[str]) -> str:
     def sub(m):
         k = m.group(0)
         return k if k in keep else "(다른 사례)"
-    return _re.sub(r"LSI-\d+", sub, text)
+    return _re.sub(issue_keys.STEM, sub, text)
 
 
 def _case_block(r: dict, keep: set[str] | None = None) -> str:
@@ -1093,7 +1099,7 @@ def _example_key(match_recs: list[dict]) -> str:
         k = str(r.get("key", ""))
         if k:
             return k
-    return "LSI-000"
+    return issue_keys.placeholder()
 
 
 def _allowed_keys_block(match_recs: list[dict]) -> str:
@@ -1127,7 +1133,7 @@ def _explain_prompt_md(query_rec: dict, match_recs: list[dict]) -> str:
     # 이번 근거 목록에 있는 키만 남긴다 — 본문에 박힌 다른 사례 키는 읽는 사람이
     # 볼 수 없으므로 프롬프트에서 지운다.
     keep = {str(r.get("key", "")) for r in match_recs}
-    keep |= {re.match(r"(LSI-\d+)", k).group(1) for k in keep if re.match(r"(LSI-\d+)", k)}
+    keep = issue_keys.expand(keep)
     keep.add(str(query_rec.get("key", "")))
     cases = "\n\n".join(_case_block(r, keep) for r in match_recs)
     q = query_rec
@@ -1362,18 +1368,11 @@ def _generate_explain_md(query_rec: dict, match_recs: list[dict]):
         yield delta
     full = "".join(acc)
     if full.strip():
-        mentioned = {m for m in re.findall(r"LSI-\d+", full)}
+        mentioned = issue_keys.find_set(full)
         # 허용 집합: 근거 키 + 접미사를 뗀 형태(LSI-7-rca → LSI-7) + 질의 이슈 자신.
         # 본문은 자연스럽게 "LSI-7" 로 쓰는데 근거 키는 "LSI-7-rca" 라, 이걸 구분하지
         # 않으면 정상 인용이 환각으로 잡힌다(측정에서 확인).
-        allowed = set(valid)
-        for k in list(valid) + [query_rec.get("key", "")]:
-            if not k:
-                continue
-            allowed.add(k)
-            m = re.match(r"(LSI-\d+)", str(k))
-            if m:
-                allowed.add(m.group(1))
+        allowed = issue_keys.expand(list(valid) + [query_rec.get("key", "")])
         cited = sorted(mentioned & allowed)
         dropped = sorted(mentioned - allowed)   # 제공되지 않은 사례를 본문이 언급
         if dropped:
@@ -1983,7 +1982,7 @@ def _md_to_jira(md: str) -> str:
     s = "\n".join(out)
     # 이슈 키(LSI-123) monospace 래핑: 맨키워드는 Jira가 요약·상태 카드로 자동 확장돼
     # 참조가 길어진다. {{...}}로 감싸면 짧은 평문으로 렌더(카드 미확장). 중복 래핑 방지.
-    s = re.sub(r"\{\{LSI-\d+\}\}|LSI-\d+",
+    s = re.sub(rf"\{{\{{{issue_keys.STEM}\}}\}}|{issue_keys.STEM}",
                lambda m: m.group(0) if m.group(0).startswith("{{") else "{{" + m.group(0) + "}}", s)
     return s
 
@@ -2086,7 +2085,7 @@ def rca_draft_from_analysis(req: AnalysisDraftBody):
         return _not_queued("empty_analysis", "분석 본문이 비어 있습니다. 먼저 '✨ AI 심층 분석'을 생성하세요.")
     # 인용 검증: 본문/전달 키 ∩ KB 키 (환각 차단)
     valid = set(st["by_key"].keys())
-    cited = sorted({k for k in (set(req.citations) | set(re.findall(r"LSI-\d+", req.analysis_md)))} & valid)
+    cited = sorted({k for k in (set(req.citations) | issue_keys.find_set(req.analysis_md))} & valid)
     cited_str = ", ".join(cited) if cited else "없음"
     body = (
         f"🤖 **{BOT_MARKER}** (RCA-bot · AI 심층 분석 · 근거: {cited_str})\n\n"
@@ -2134,7 +2133,7 @@ def rca_approve(req: ApproveBody, request: Request):
                                       final_body=final, edited=(original.strip() != final.strip()))
         # 사람 수정 피드백 저장(성능 개선용) — 클래스 매칭을 위해 분류/템플릿 동봉
         rec = _reco_state()["by_key"].get(req.key, {})
-        cited = sorted(set(re.findall(r"LSI-\d+", final)))
+        cited = sorted(issue_keys.find_set(final))
         rca_feedback.record(req.key, item.get("summary", ""), item.get("source", ""),
                             original, final, item.get("based_on", ""), now,
                             category=rec.get("category", ""),
@@ -2197,6 +2196,26 @@ def rca_draft_feedback(template: str = "", cause: str = "", limit: int = 20):
 # ---------------------------------------------------------------------------
 # 지식 자산 영속화·환류 (P1-1)
 # ---------------------------------------------------------------------------
+@app.get("/knowledge/sources", dependencies=[Depends(require("knowledge.read"))])
+def knowledge_sources():
+    """KB 원천 현황 — 어떤 파일이 지식베이스를 이루고, 각각 몇 건이 근거로 쓰이는가.
+
+    합계는 **중복 제거 후 실제 적재 기준**이다. 파일별 건수를 더한 값과 다를 수 있고,
+    다르다면 키가 겹친 것이다. 서빙 중인 KB 와 대조해 드리프트도 함께 낸다 —
+    설정을 바꾸고 캐시를 무효화하지 않으면 이 둘이 갈라진다.
+    """
+    st = kb_source.status()
+    live = _reco_state()
+    st["live"] = {
+        "records": len(live["records"]),
+        "resolved": len(live["resolved"]),        # 큐레이션 환류분 포함
+        "unresolved": len(live["unresolved"]),
+    }
+    # 파일 기준과 서빙 기준의 차 — 큐레이션 지식(승인된 RCA) 유입분이라 보통 양수다.
+    st["curated_in_live"] = st["live"]["resolved"] - st["resolved"]
+    return st
+
+
 @app.get("/knowledge/stats", dependencies=[Depends(require("knowledge.read"))])
 def knowledge_stats():
     """영속 큐레이션 지식 저장소 현황(건수·출처·저장 경로)."""
@@ -2614,7 +2633,7 @@ def rca_reject(req: RejectBody, request: Request):
             origin="human", note=req.note,
             category=rec.get("category", ""), template=template_key(item.get("summary", "")),
             chip=rec.get("chip", ""), source=item.get("source", ""),
-            citations=sorted(set(re.findall(r"LSI-\d+", item.get("body", "")))),
+            citations=sorted(issue_keys.find_set(item.get("body", ""))),
             confidence=item.get("confidence"), reviewer=_actor(request))
     return {"ok": bool(updated), "item": updated, "counts": rca_queue.counts(),
             "feedback": fb, "draft_feedback": draft_feedback.stats()}
@@ -2669,7 +2688,7 @@ def rca_validate(req: ValidateBody):
     if not body:
         return {"error": "검증할 본문이 없습니다."}
     valid = set(st["by_key"].keys())
-    cited = set(re.findall(r"LSI-\d+", body))
+    cited = issue_keys.find_set(body)
     invalid = sorted(c for c in cited if c not in valid)
     vr = validate_and_fix(body)
     out = {
