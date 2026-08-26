@@ -19,6 +19,8 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+
+import issue_keys
 from pathlib import Path
 
 from json_store import read_json, write_json_atomic, now_iso as _now
@@ -195,7 +197,7 @@ def rebuild_from_jira(bot_marker: str, project: str | None = None,
                 if f"{issue_key}-rca" in existing:
                     continue  # 이미 보유 — 덮어쓰지 않음(누락분만 복구)
                 body = c.get("body", "")
-                cites = sorted(set(re.findall(r"LSI-\d+", body)))
+                cites = sorted(issue_keys.find_set(body))
                 try:
                     upsert(issue_key, "", body, comment_id=str(c.get("id", "")),
                            citations=cites, author=c.get("author", ""),

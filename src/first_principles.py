@@ -28,6 +28,8 @@
 from __future__ import annotations
 
 import re
+
+import issue_keys
 from collections import Counter
 
 from recommender import template_key
@@ -209,13 +211,12 @@ def validate(md: str, bundle: dict) -> dict:
     검증이 없으면 게이트를 무력화한 것과 같다.
     """
     present = {name: (marker in md) for name, marker in SECTIONS}
-    mentioned = set(re.findall(r"LSI-\d+(?:-\w+)?", md))
+    mentioned = set(issue_keys.find_full(md))
     allow = allowed_keys(bundle)
-    # 접미사(-rca) 표기 차이를 흡수
-    stems = {re.match(r"(LSI-\d+)", k).group(1) for k in allow if re.match(r"(LSI-\d+)", k)}
+    # 접미사(-rca) 표기 차이를 흡수 — 근거 키가 LSI-7-rca 인데 본문은 LSI-7 로 쓴다.
+    allowed = issue_keys.expand(allow)
     unsupported = sorted({m for m in mentioned
-                          if m not in allow and re.sub(r"-\w+$", "", m) not in stems
-                          and m not in stems})
+                          if m not in allowed and issue_keys.stem(m) not in allowed})
 
     # 가설 절에 (추정) 이 붙었는가 — 가설을 단정으로 쓰면 이 기능의 취지가 무너진다.
     hyp = ""

@@ -47,8 +47,10 @@ def snapshot(records: list[dict] | None = None) -> dict:
 
     if records is None:
         import preprocess
-        raw = json.loads((ROOT / "data" / "all_raw_issues.json").read_text(encoding="utf-8"))
-        records = [preprocess.parse_issue(r) for r in raw]
+        import kb_source
+        # 서버(`_build_reco_state`)와 **같은 원천**이어야 한다 — 갈라지면 대시보드와
+        # 개선 큐가 서로 다른 KB 를 근거로 다른 결론을 낸다(이미 한 번 당한 실패).
+        records = [preprocess.parse_issue(r) for r in kb_source.raw_issues()]
     base = [r for r in records if not r.get("curated")]
 
     quality = _safe(lambda: quality_gate.validate(base), default={})
@@ -240,8 +242,8 @@ def embed_kwargs() -> dict:
 
 def _resolved_kb():
     import preprocess
-    raw = json.loads((ROOT / "data" / "all_raw_issues.json").read_text(encoding="utf-8"))
-    records = [preprocess.parse_issue(r) for r in raw]
+    import kb_source
+    records = [preprocess.parse_issue(r) for r in kb_source.raw_issues()]
     return [r for r in records if r.get("status") == "완료" and not r.get("curated")]
 
 

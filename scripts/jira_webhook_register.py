@@ -35,7 +35,12 @@ sys.path.insert(0, str(ROOT / "src"))
 from ingest import jira_session  # noqa: E402
 
 WEBHOOK_API = "/rest/webhooks/1.0/webhook"
-NAME = "lsi-error-analyzer KB sync"
+# 신규 등록에 쓸 이름. 프로젝트 리네임(voc-agent) 이전에 등록된 웹훅은 옛 이름으로
+# Jira 에 남아 있으므로, 조회·해제는 두 이름을 모두 본다 — 새 이름만 보면 기존
+# 등록분을 찾지 못해 "없다"고 하고, 중복 등록으로 이어진다.
+NAME = "voc-agent KB sync"
+LEGACY_NAMES = ("lsi-error-analyzer KB sync",)
+KNOWN_NAMES = (NAME, *LEGACY_NAMES)
 EVENTS = ["jira:issue_created", "jira:issue_updated", "jira:issue_deleted",
           "comment_created", "comment_updated", "comment_deleted"]
 
@@ -74,7 +79,7 @@ def cmd_register(public_base: str) -> int:
         return 2
 
     for h in _list(s, base):
-        if h.get("name") == NAME:
+        if h.get("name") in KNOWN_NAMES:
             hid = (h.get("self") or "").rsplit("/", 1)[-1]
             print(f"[중단] 같은 이름의 웹훅이 이미 있습니다(id={hid}). "
                   f"먼저 delete 하거나 이름을 바꾸세요.")
