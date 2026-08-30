@@ -9,9 +9,14 @@ import react from '@vitejs/plugin-react'
 // 않는다. SameSite=None 은 Secure(https)를 요구하므로 로컬에서 쓸 수 없다.
 // 프로덕션은 FastAPI 가 web/dist 를 같은 오리진에서 서빙하므로 원래 같은 사이트다 —
 // 즉 이 프록시는 개발 환경을 프로덕션과 같은 모양으로 만드는 것이다.
+// 백엔드의 **모든 최상위 경로**가 여기 있어야 한다. 빠지면 개발 서버가 그 요청에
+// index.html 을 돌려주고, 프런트에서는 "JSON 이 아닌 응답" → null 역참조로 나타난다
+// (실제로 guides·metrics 가 빠져 화면이 깨졌다). tests/web/test_api_prefixes.mjs 가
+// 서버 라우트와 이 목록을 대조한다 — 사람이 기억하는 것에 맡기지 않는다.
 const API_PREFIXES = [
   'auth', 'health', 'config', 'webhook', 'reco', 'voc', 'issues', 'graph',
-  'recommend', 'rca', 'chat', 'knowledge', 'eval', 'improve', 'selfcheck', 'jira', 'explain',
+  'recommend', 'rca', 'chat', 'guides', 'knowledge', 'metrics', 'eval', 'improve',
+  'selfcheck', 'jira', 'explain',
 ]
 
 const API_TARGET = process.env.VITE_PROXY_TARGET ?? 'http://127.0.0.1:8011'
