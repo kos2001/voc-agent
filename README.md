@@ -445,7 +445,7 @@ HTTP 직접 호출)** 단일 엔진으로 생성한다. 모델·엔드포인트�
 | 심각도 | 코드 | 뜻 |
 |---|---|---|
 | 차단 | `secret_leak` `internal_key` `han_char` `date_promise` `compensation_promise` `plain_speech` `third_party` `wrong_language` | 고치기 전에는 발송 불가 |
-| 경고 | `unanswered_ask` `suspect_spelling` `internal_jargon` `missing_next_step` `too_long` `unsupported_certainty` | 사람이 보고 판단 |
+| 경고 | `unanswered_ask` `unknown_key` `suspect_spelling` `internal_jargon` `missing_next_step` `too_long` `unsupported_certainty` | 사람이 보고 판단 |
 
 시점 표현만으로는 걸리지 않는다 — "다음 주에 확인해 보겠습니다" 는 약속이 아니다.
 시점 + 완료 약속이 한 문장에 같이 있을 때만 `date_promise` 다. 오탐이 잦으면 경고가
@@ -463,6 +463,11 @@ HTTP 직접 호출)** 단일 엔진으로 생성한다. 모델·엔드포인트�
 글이라 오타 하나가 답변 전체의 신뢰를 깎는다. 다만 사전 없이 잡을 수 있는 것은
 단독 자모·같은 글자 반복·문장부호 앞 공백뿐이라 **경고**다. 진짜 오타는 아래 교정
 단계가 맡는다 — 못 잡는 것을 잡는 척하지 않는다.
+
+`unknown_key` 는 **근거에 없는 이슈 키**다. 사내 프로파일은 키를 허용하지만 근거에
+없는 키는 여전히 환각이다 — 모델을 바꾸자마자 "본 건은 SPT-1042 로 추적합니다" 처럼
+없는 티켓 번호가 나왔다. 받는 사람은 그 번호를 찾으러 갔다가 없다는 것을 알기까지
+시간을 쓴다. 챗봇에는 있던 가드(`unsupported_mentions`)가 답변에는 없었다.
 
 `third_party` 는 **다른 고객사 이름**이다. 근거 사례는 남의 고장 이력이라 "다른 고객사
 ○○ 에서도" 는 사실이어도 비밀유지 문제가 된다. 내부 키와 달리 **자동으로 지우지
@@ -996,6 +1001,30 @@ JIRA_EMAIL=...           JIRA_API_TOKEN=...      # 또는 JIRA_PAT
 RVP_SESSION_SECRET=...   RVP_ADMIN_EMAILS=...    # 인증·권한 (위 절 참조)
 OPENROUTER_API_KEY=...   OPENROUTER_MODEL=...    # LLM 엔진=agno(OpenRouter)
 ```
+
+## 모델
+
+| 용도 | 기본값 | 설정 |
+|---|---|---|
+| 생성 (답변·챗봇·조사 계획·교정) | `z-ai/glm-5.3-flash` | `OPENROUTER_MODEL` |
+| 판정 (분석 점수·답변 검토) | `z-ai/glm-5.3-flash` | `RVP_JUDGE_MODEL` |
+| 임베딩 (유사 사례 검색) | `baai/bge-m3` | `RVP_EMBED_MODEL` |
+| 재순위 | `cohere/rerank-v3.5` | `RVP_RERANK_MODEL` |
+
+**저장 설정이 `.env` 를 이긴다.** 온보딩에서 저장한 값(`tmp_db/app_config.json`)이 기동
+시 환경에 주입되므로, `.env` 만 고치면 모델이 바뀌지 않는다 — 둘 다 맞춰야 한다.
+
+모델을 바꾸면서 두 가지가 드러났다.
+
+- **시스템 메시지가 낡아 있었다.** `_llm_stream` 에 "LSI 칩/펌웨어 불량 분석 시니어
+  엔지니어… 근거 키는 (LSI-49)처럼 인라인 인용한다" 가 박혀 있었다. 분석 도구였을
+  때의 잔재인데, 지금 이 경로를 쓰는 넷(고객 답변·챗봇·교정·조사 계획)은 전부 자기
+  페르소나를 프롬프트에 담아 온다. 고객 답변은 사례 키를 **금지**하는데 시스템이
+  요구하는 식으로 정면 충돌했다. 느슨한 모델은 무시했지만 지시를 잘 따르는 모델로
+  바꾸자 곧바로 드러났다 — 빈 답변과 "사례를 주세요" 라는 거절이 나왔다.
+  역할은 프롬프트가 정하고 시스템 메시지는 형식만 말하도록 중립화했다
+  (`RVP_SYSTEM_PROMPT` 로 덮어쓸 수 있다).
+- **없는 티켓 번호를 지어냈다** → `unknown_key` 경고 추가(위 표 참조).
 
 ## Stack
 

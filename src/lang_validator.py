@@ -3,8 +3,8 @@
 Detects characters outside the allowed alphabet (Korean Hangul + Latin ASCII +
 common punctuation/digits/emoji) and optionally rewrites them using an LLM.
 
-The model we use (deepseek-v4-flash) occasionally leaks Chinese characters
-into Korean output (e.g. "언제恢复正常하나요"). This validator catches that.
+생성 모델이 한국어 출력에 한자를 흘리는 일이 있다 — deepseek-v4-flash 에서
+"언제恢复正常하나요" 같은 형태로 실측됐다. 이 검증기가 그것을 잡는다.
 """
 from __future__ import annotations
 

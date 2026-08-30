@@ -1202,10 +1202,25 @@ def _explain_prompt_md(query_rec: dict, match_recs: list[dict]) -> str:
         + _allowed_keys_block(match_recs))
 
 
-def _llm_stream(prompt: str, reasoning: bool = False):
+# 시스템 메시지. **중립이어야 한다.**
+#
+# 예전에는 여기에 "LSI 칩/펌웨어 불량 분석 시니어 엔지니어… 근거 키는 (LSI-49)처럼
+# 인라인 인용한다" 가 박혀 있었다. 분석 도구였을 때의 잔재인데, 지금 이 경로를 쓰는
+# 호출부는 넷이고 전부 자기 페르소나와 규칙을 프롬프트에 담아 온다:
+#   고객 답변(사례 키 금지) · 이슈 챗봇 · 오타 교정 · 1차 원리 조사 계획.
+# 시스템 메시지가 그것들과 **정면으로 충돌**한다 — 고객 답변에서 금지한 사례 키를
+# 시스템이 요구하는 식이다. 느슨한 모델은 무시했지만 지시를 잘 따르는 모델로 바꾸자
+# 곧바로 드러났다(빈 답변·거절). 역할은 프롬프트가 정하고, 여기서는 형식만 말한다.
+_SYS_DEFAULT = (
+    "요청받은 형식과 지시를 정확히 따른다. 지시된 섹션을 순서대로 빠짐없이 작성한다. "
+    "한국어로 답할 때는 한자/CJK 한자를 쓰지 않는다(한글·영문·숫자·문장부호만). "
+    "요청에 없는 서두나 맺음말을 덧붙이지 않는다.")
+
+
+def _llm_stream(prompt: str, reasoning: bool = False, system: str = ""):
     """OpenRouter chat/completions 스트리밍 — 콘텐츠 토큰(str)만 순차 yield.
 
-    agno 스트리밍 래퍼는 추론 모델(deepseek-v4-flash 등)에서 콘텐츠 스트림을
+    agno 스트리밍 래퍼는 추론 모델(deepseek-v4-flash·glm-5.3-flash 등)에서 콘텐츠 스트림을
     조기 종료시켜 답변이 헤더/문장 도중에 잘리는 문제가 있다(비스트리밍/직접
     스트리밍은 정상 완결). 따라서 OpenRouter SSE를 직접 호출한다. 추론 델타는
     별도 'reasoning' 필드로 오므로 무시하고 최종 콘텐츠만 전송한다.
@@ -1218,13 +1233,7 @@ def _llm_stream(prompt: str, reasoning: bool = False):
     base = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
     # 한국어는 토큰 소모가 커 상한이 낮으면 도중에 잘린다. 기본 8000, env로 조정.
     max_tokens = int(os.getenv("RVP_EXPLAIN_MAX_TOKENS", "8000"))
-    sys_msg = (
-        "LSI 칩/펌웨어 불량 분석 시니어 엔지니어로서 한국어 마크다운으로 깊이 있게 답한다. "
-        "지시된 모든 섹션을 순서대로 빠짐없이 작성한다(특히 권장 해결 단계·우회책 누락 금지). "
-        "제공된 '과거 해결 사례'만 근거로 사용하고, 근거 키는 (LSI-49)처럼 본문에 인라인 인용한다. "
-        "표면적 요약이 아니라 메커니즘 수준의 인과와 검증 방법까지 제시한다. "
-        "한자/CJK 한자 금지 — 한글/영문/숫자/문장부호만."
-    )
+    sys_msg = system or os.getenv("RVP_SYSTEM_PROMPT") or _SYS_DEFAULT
     payload = {
         "model": model_id, "max_tokens": max_tokens, "stream": True,
         "messages": [{"role": "system", "content": sys_msg},
@@ -1436,7 +1445,9 @@ def _generate_explain_md(query_rec: dict, match_recs: list[dict]):
     body, proof = _proofread(body)      # 오타 교정 — 내용이 바뀌면 원문을 유지한다
     forbidden = tuple(_forbidden_names(query_rec))
     policy = voc_agents.check(body, has_evidence=bool(match_recs), forbidden=forbidden,
-                              lang=lang, asks=intent["asks"], prof=_voc_profile())
+                              lang=lang, asks=intent["asks"], prof=_voc_profile(),
+                              known_keys=[r.get("key") for r in match_recs]
+                                         + [query_rec.get("key", "")])
     _explain_md_store(query_rec, match_recs,
                       {"markdown": body, "citations": [], "dropped": [],
                        "policy": policy, "intent": intent["intent"],
@@ -2478,7 +2489,8 @@ def _reply_item(rec: dict, key: str, body: str, engine: str,
     두 곳에서 만들면 재검사 기준(근거·금지어·언어)이 갈라진다."""
     forbidden = _forbidden_names(rec)
     policy = voc_agents.check(body, has_evidence=bool(matches), forbidden=tuple(forbidden),
-                              lang=lang, asks=intent["asks"], prof=_voc_profile())
+                              lang=lang, asks=intent["asks"], prof=_voc_profile(),
+                              known_keys=[m.get("key") for m in matches] + [key])
     return {
         "key": key, "summary": rec.get("summary", ""), "status": rec.get("status", ""),
         "body": body, "intent": intent["intent"], "intent_label": intent["label"],
@@ -2708,7 +2720,8 @@ def voc_reply_review(req: ReplyReviewBody):
     policy = voc_agents.check(body, has_evidence=bool(item.get("has_evidence")),
                               forbidden=tuple(item.get("forbidden") or ()),
                               lang=str(item.get("lang") or "ko"),
-                              asks=item.get("asks") or [], prof=_voc_profile())
+                              asks=item.get("asks") or [], prof=_voc_profile(),
+                              known_keys=(item.get("evidence") or []) + [req.key])
     ask = "\n".join(item.get("asks") or []) or str(rec.get("customer_ask", ""))
     return {"policy": policy, "review": _review_reply(ask, body, guide_block),
             "asks": item.get("asks") or []}
@@ -2749,7 +2762,8 @@ def voc_reply_check(req: ReplyCheckBody):
     lang = str(item.get("lang") or "ko") if item else "ko"
     return voc_agents.check(req.body, has_evidence=has_ev, forbidden=forbidden, lang=lang,
                             asks=(item.get("asks") or []) if item else (),
-                            prof=_voc_profile())
+                            prof=_voc_profile(),
+                            known_keys=((item.get("evidence") or []) + [req.key]) if item else ())
 
 
 class ReplySendBody(BaseModel):
@@ -2775,7 +2789,8 @@ def voc_reply_send(req: ReplySendBody, request: Request):
     policy = voc_agents.check(final, has_evidence=bool(item.get("has_evidence")),
                               forbidden=tuple(item.get("forbidden") or ()),
                               lang=str(item.get("lang") or "ko"),
-                              asks=item.get("asks") or [], prof=_voc_profile())
+                              asks=item.get("asks") or [], prof=_voc_profile(),
+                              known_keys=(item.get("evidence") or []) + [req.key])
     if policy["blocked"]:
         return {"ok": False, "error": "정책 위반이 남아 있어 발송하지 않았습니다.",
                 "policy": policy}

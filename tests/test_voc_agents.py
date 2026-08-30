@@ -190,6 +190,30 @@ def test_policy_warns() -> None:
               "확인해 보니 원인은 전원부 불량입니다.", has_evidence=False)))
 
 
+def test_unknown_key() -> None:
+    """사내 프로파일은 이슈 키를 허용하지만 **근거에 없는 키는 여전히 환각**이다.
+
+    실측에서 모델이 "본 건은 SPT-1042 로 추적합니다" 처럼 없는 티켓 번호를 지어냈다.
+    받는 사람은 그 번호를 찾으러 갔다가 없다는 것을 알기까지 시간을 쓴다.
+    """
+    print("\n[근거에 없는 이슈 키]")
+    t = "본 건은 SPT-1042 로 추적합니다. LSI-7 사례와 같습니다. 안내드리겠습니다."
+    r = V.check(t, prof="internal", known_keys=["LSI-7", "IVOC-44"])
+    check("지어낸 키를 잡는다", "unknown_key" in codes(r), str(codes(r)))
+    check("차단이 아니라 경고 — 사내에서 키 자체는 정상이다", r["blocked"] is False)
+    check("근거 키만 있으면 조용하다",
+          "unknown_key" not in codes(V.check("LSI-7 사례와 같습니다. 안내드리겠습니다.",
+                                             prof="internal", known_keys=["LSI-7"])))
+    check("질의 이슈 자신도 허용",
+          "unknown_key" not in codes(V.check("IVOC-44 진행 상황입니다. 안내드리겠습니다.",
+                                             prof="internal", known_keys=["LSI-7", "IVOC-44"])))
+    check("known_keys 를 안 주면 검사하지 않는다 — 모르는 것을 틀렸다고 하지 않는다",
+          "unknown_key" not in codes(V.check(t, prof="internal")))
+    check("파생 키도 원본으로 인정",
+          "unknown_key" not in codes(V.check("LSI-7 참고. 안내드리겠습니다.",
+                                             prof="internal", known_keys=["LSI-7-rca"])))
+
+
 def test_third_party() -> None:
     print("\n[제3자 정보 노출]")
     r = V.check("다른 고객사 Lumen Imaging 에서도 같은 증상이 있었습니다. 안내드리겠습니다.",
@@ -679,7 +703,7 @@ def test_reply_without_evidence_still_drafts() -> None:
 
 def main() -> int:
     for fn in (test_intent, test_asks, test_customer_ask_is_parsed, test_ask_terms_stem, test_internal_profile, test_secret_leak, test_policy_blocks, test_policy_does_not_overreach,
-               test_policy_warns, test_third_party, test_unanswered_ask, test_spelling_warn,
+               test_policy_warns, test_third_party, test_unknown_key, test_unanswered_ask, test_spelling_warn,
                test_proofread_guard, test_redact, test_render, test_internal_render_and_mock, test_render_without_evidence,
                test_rma_never_promises, test_prompt_hides_internal_keys, test_evidence_scrubbing_and_canonical,
                test_language,
