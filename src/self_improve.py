@@ -62,6 +62,10 @@ def snapshot(records: list[dict] | None = None) -> dict:
         "draft_feedback": _safe(draft_feedback.stats, {}),
         "draft_classes": _safe(lambda: draft_feedback.by_class()[:10], []),
         "draft_trend": _safe(draft_feedback.trend, {}),
+        # 개입(프롬프트 규칙 주입)이 실제로 결함을 줄였는지 — loop 에서 **검증** 단계.
+        # 이게 없으면 효과 없는 규칙이 영원히 남고, "조치했다" 는 착각 때문에 진짜
+        # 레버(검색·지식)를 손대지 않게 된다.
+        "guidance_effect": _safe(lambda: draft_feedback.guidance_effect(), []),
         "kb_quality": {"ok": quality.get("ok"), "violations": quality.get("violations", []),
                        "fill": (quality.get("report") or {}).get("fill", {}),
                        "deficient": len((quality.get("report") or {}).get("deficient_resolved_keys", []))},
@@ -103,6 +107,17 @@ def recommendations(snap: dict) -> list[dict]:
         out.append({"priority": "P1", "area": "초안 품질 추세",
                     "action": (f"무수정 승인율이 {dt['clean_rate_prev']} → {dt['clean_rate_curr']} "
                                f"로 하락({dt['delta']}) — 최근 변경(프롬프트/파라미터/KB)의 회귀 의심")})
+    # 효과 없는 개입은 진단으로 올린다 — 숫자만 쌓고 아무 일도 안 일어나면
+    # 검증을 붙인 의미가 없다.
+    ge = [g for g in (snap.get("guidance_effect") or [])
+          if isinstance(g, dict) and g.get("verdict") in ("효과 없음", "악화")]
+    for g in ge[:3]:
+        out.append({"priority": "P1" if g["verdict"] == "악화" else "P2",
+                    "area": "개입 효과",
+                    "action": (f"'{g['template'][:30]}' 의 '{g['label']}' 는 프롬프트 규칙 주입 후에도 "
+                               f"{g['rate_before']}→{g['rate_after']} (대조군 보정 {g['adjusted_delta']:+}) "
+                               f"— {g['verdict']}. 개선 큐의 escalate_lever 제안으로 레버를 올릴 것")})
+
     fb = snap.get("reco_feedback", {})
     rate = fb.get("helpful_rate")
     if rate is not None and rate < 0.7 and fb.get("total", 0) >= 5:

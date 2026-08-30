@@ -487,6 +487,102 @@ def prompt_guidance(category: str = "", template: str = "",
 
 
 # --------------------------------------------------------------------------- #
+# 검증: 주입한 가이던스가 실제로 결함을 줄였나
+# --------------------------------------------------------------------------- #
+# loop 가 측정 → 진단 → 개입까지만 있고 **검증**이 없으면, 효과 없는 규칙이 영원히
+# 프롬프트에 남는다. 컨텍스트를 먹는 것보다 나쁜 것은 "조치했다"는 착각이다 —
+# 그 착각 때문에 진짜 레버(검색·지식)를 손대지 않게 된다.
+EFFECT_MIN_AFTER = int(os.getenv("RVP_DRAFT_FB_EFFECT_MIN_AFTER", "4"))
+# 이중차분이 이 폭을 넘어야 판정한다. 좁게 잡으면 표본 노이즈가 '효과'로 읽힌다.
+EFFECT_MARGIN = 0.15
+
+
+def _activation_index(seq: list[list[str]], cause: str, threshold: int) -> int | None:
+    """가이던스가 켜진 지점 = 그 원인의 누적 횟수가 임계에 도달한 이벤트의 인덱스."""
+    n = 0
+    for i, causes in enumerate(seq):
+        if cause in causes:
+            n += 1
+            if n >= threshold:
+                return i
+    return None
+
+
+def guidance_effect(min_after: int = 0, min_count: int = 0) -> list[dict]:
+    """활성화된 가이던스별로 "그 원인이 실제로 줄었나" 를 판정한다.
+
+    **단순 전후 비교를 쓰지 않는다.** 활성 시점은 정의상 "그 원인이 많이 나온 시점"
+    이므로, 개입에 아무 효과가 없어도 이후 발생률은 평균으로 되돌아가며 떨어진다.
+    전후 델타만 보면 어떤 규칙이든 "효과 있음" 이 나온다.
+
+    그래서 **같은 클래스·같은 기간의 다른 원인**을 대조군으로 둔다(이중차분):
+        adjusted = (대상 원인 발생률 변화) − (다른 원인 발생률 변화)
+    대상만 줄었으면 adjusted 가 크게 음수고, 전체가 함께 줄었으면 0 근처가 된다.
+
+    관측 연구지 통제 실험이 아니다 — 같은 기간에 KB 가 커지거나 파라미터가 바뀌면
+    그 영향도 섞인다. 그래서 판정은 넉넉한 여유(EFFECT_MARGIN)를 두고, 근거 수치를
+    전부 함께 돌려준다. 사람이 숫자를 보고 뒤집을 수 있어야 한다.
+    """
+    min_after = min_after or EFFECT_MIN_AFTER
+    min_count = min_count or GUIDANCE_MIN_COUNT
+    by_tpl: dict[str, list[dict]] = defaultdict(list)
+    for e in sorted(_load(), key=lambda x: x.get("created_at", "")):
+        by_tpl[e.get("template") or e.get("category") or "(미분류)"].append(e)
+
+    out: list[dict] = []
+    for tpl, evs in by_tpl.items():
+        seq = [list(e.get("causes") or []) for e in evs]
+        # 가이던스가 붙는 원인만 본다 — guidance 문구가 없는 원인은 애초에 개입이 없다.
+        for cause in {c for cs in seq for c in cs}:
+            if not (CAUSES.get(cause) or {}).get("guidance"):
+                continue
+            idx = _activation_index(seq, cause, min_count)
+            if idx is None:
+                continue
+            before, after = seq[:idx + 1], seq[idx + 1:]
+            def rate(chunk, target):        # noqa: E306
+                return round(sum(1 for cs in chunk if target in cs) / len(chunk), 3) if chunk else 0.0
+            def other_rate(chunk):          # noqa: E306
+                """대조군: 같은 구간에서 **대상 이외의** 원인이 붙은 비율."""
+                return round(sum(1 for cs in chunk if any(c != cause for c in cs)) / len(chunk), 3) if chunk else 0.0
+            b_r, a_r = rate(before, cause), rate(after, cause)
+            b_o, a_o = other_rate(before), other_rate(after)
+            delta = round(a_r - b_r, 3)
+            ctrl = round(a_o - b_o, 3)
+            adjusted = round(delta - ctrl, 3)
+            if len(after) < min_after:
+                verdict = "표본 부족"
+            elif adjusted <= -EFFECT_MARGIN:
+                verdict = "효과 있음"
+            elif adjusted >= EFFECT_MARGIN:
+                verdict = "악화"
+            else:
+                verdict = "효과 없음"
+            out.append({
+                "template": tpl, "cause": cause,
+                "label": CAUSES.get(cause, CAUSES["other"])["label"],
+                "lever": lever_of(cause),
+                "activated_after": idx + 1, "n_before": len(before), "n_after": len(after),
+                "rate_before": b_r, "rate_after": a_r, "delta": delta,
+                "control_before": b_o, "control_after": a_o, "control_delta": ctrl,
+                "adjusted_delta": adjusted, "verdict": verdict,
+            })
+    out.sort(key=lambda r: (r["verdict"] == "표본 부족", -abs(r["adjusted_delta"])))
+    return out
+
+
+# 효과 없는 개입이 걸렸을 때 어느 레버로 올릴 것인가. 프롬프트 규칙(generation)으로
+# 안 잡히는 결함은 대개 입력(근거) 쪽 문제다 — 글쓰기 지시를 더 붙여봐야 소용없다.
+ESCALATE_TO = {
+    "generation": ("retrieval", "근거 선택이 문제일 가능성이 크다 — 게이트/랭킹 파라미터를 shadow 평가"),
+    "retrieval": ("knowledge", "검색으로 나올 사례가 KB 에 없을 가능성 — 사례 작성/폐기 검토"),
+    "presentation": ("generation", "형식 규칙이 안 먹힌다 — 검증기로 승인 전 차단"),
+    "knowledge": ("knowledge", "지식 자체의 문제 — 사례 작성·폐기 외에 우회로가 없다"),
+    "other": ("other", "원인이 특정되지 않는다 — 사람이 사례를 직접 읽어야 한다"),
+}
+
+
+# --------------------------------------------------------------------------- #
 # 환류 ②: 자기개선 loop 제안 (L3 — 사람 검토 큐로)
 # --------------------------------------------------------------------------- #
 SUGGEST_MIN = int(os.getenv("RVP_DRAFT_FB_SUGGEST_MIN", "3"))
@@ -567,6 +663,26 @@ def suggestions(min_count: int = 0) -> list[dict]:
                         "action_hint": "POST /rca/validate 규칙 보강(lang_validator)"})
         if len(out) >= SUGGEST_MAX:
             break
+
+    # 1b) **효과 없는 개입은 그대로 두지 않는다.** 이미 프롬프트 규칙을 주입했는데도
+    #     같은 원인이 계속 나오면, 그 레버로는 안 잡히는 결함이라는 뜻이다. 규칙을
+    #     더 붙이는 대신 다음 레버로 올린다 — 이게 loop 에 '검증' 을 붙인 이유다.
+    for r in guidance_effect():
+        if r["verdict"] not in ("효과 없음", "악화"):
+            continue
+        to_lever, how = ESCALATE_TO.get(r["lever"], ESCALATE_TO["other"])
+        out.append({
+            "type": "escalate_lever",
+            "priority": "P1" if r["verdict"] == "악화" else "P2",
+            "target": f"{r['template'][:60]}|{r['cause']}",
+            "rationale": (f"'{r['template'][:40]}' 의 '{r['label']}' 는 프롬프트 규칙을 "
+                          f"주입한 뒤에도 발생률이 {r['rate_before']} → {r['rate_after']} "
+                          f"(대조군 보정 {r['adjusted_delta']:+}) 로 {r['verdict']}. "
+                          f"generation 레버로는 안 잡힌다 → {to_lever}: {how}"),
+            "evidence": r,
+            "action_hint": ("POST /selfimprove/param/evaluate" if to_lever == "retrieval"
+                            else "POST /knowledge/lifecycle 또는 해당 고장군 RCA 작성"),
+        })
 
     # 2) 특정 사례가 반복해서 잘못 인용됨 → 그 사례 자체를 손봐야 한다
     bad_cites: Counter = Counter()
