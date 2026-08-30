@@ -96,6 +96,10 @@ def _comment_block(comment: str, label: str) -> str:
 
 
 BOT_COMMENT_MARKER = "자동 근본원인 분석"  # RCA-bot 댓글 식별 (scripts/rca_comment.py)
+# 우리가 고객에게 보낸 답변도 KB 근거가 아니다 — 이슈의 관찰 정보가 아니라 이 시스템의
+# 산출물이라, 다시 읽어 들이면 자기 출력을 근거로 삼는 되먹임이 생긴다.
+REPLY_COMMENT_MARKER = "고객 안내 답변"
+_OWN_OUTPUT_MARKERS = (BOT_COMMENT_MARKER, REPLY_COMMENT_MARKER)
 
 # 협업 스레드 중 '관찰/분석 단계' 코멘트 식별 — 미해결 이슈도 가질 수 있는 신호.
 # (해결 단계인 ✅/🙌 와 시니어 RCA(🔍)는 질의 신호로 쓰지 않는다: 미해결 질의엔
@@ -136,7 +140,8 @@ def parse_issue(raw: dict) -> dict:
     RCA-bot이 단 자동 분석 댓글은 시니어 분석으로 오인되어 KB를 오염시키므로 제외한다.
     """
     desc = raw.get("description", "")
-    comments = [c for c in raw.get("comments", []) if BOT_COMMENT_MARKER not in c[:80]]
+    comments = [c for c in raw.get("comments", [])
+                if not any(mk in c[:80] for mk in _OWN_OUTPUT_MARKERS)]
     comment = comments[0] if comments else ""
     rec = {
         "key": raw["key"],
@@ -153,6 +158,10 @@ def parse_issue(raw: dict) -> dict:
         "customer": _field(desc, "고객사"),
         "fw_version": _field(desc, "펌웨어 버전"),
         "symptom": _section(desc, "증상 (Symptom)"),
+        # 고객이 '무엇을 해 달라'고 했는지. 증상과 분리해서 들고 다녀야 한다 — 증상
+        # 서술에 묻히면 답변이 요지를 빗나가고(가장 흔한 거부 사유), 미해결 질의에도
+        # 존재하는 관찰 정보라 단계 인지 매칭 원칙에도 어긋나지 않는다.
+        "customer_ask": _section(desc, "고객 요청 (Ask)"),
         "debug_approach": _comment_block(comment, "디버깅 접근"),
         "root_cause": _comment_block(comment, "근본 원인 (Root Cause)"),
         "resolution": _comment_block(comment, "적용 해결책 (Resolution)"),

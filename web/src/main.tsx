@@ -4,6 +4,7 @@ import './index.css'
 import FailureAnalysis from './FailureAnalysis.tsx'
 import Onboarding from './Onboarding.tsx'
 import RcaQueue from './RcaQueue.tsx'
+import ReplyQueue from './ReplyQueue.tsx'
 import VocPage from './VocPage.tsx'
 import Dashboard from './Dashboard.tsx'
 import { useRoute, type Route } from './useDeepLink'
@@ -27,6 +28,7 @@ const API = (import.meta as any).env?.VITE_API ?? "";   // 빈 값 = 같은 오�
 function Shell() {
   const [status, setStatus] = useState<any | undefined>(undefined); // undefined = 로딩
   const [pending, setPending] = useState(0);
+  const [replyPending, setReplyPending] = useState(0);
   // 화면 상태를 URL 해시로 옮겼다 — 새로고침·뒤로가기·링크 공유가 동작하고,
   // 대시보드에서 이슈로 바로 들어오는 드릴다운도 같은 경로를 쓴다.
   const [route, go] = useRoute();
@@ -37,7 +39,9 @@ function Shell() {
     .catch(() => setStatus({ ready: false, _err: true }));
   const loadPending = () => fetch(`${API}/rca/pending`).then((r) => r.json())
     .then((d) => setPending(d.counts?.pending ?? 0)).catch(() => {});
-  useEffect(() => { load(); loadPending(); }, []);
+  const loadReplyPending = () => fetch(`${API}/voc/reply/pending`).then((r) => r.json())
+    .then((d) => setReplyPending(d.counts?.pending ?? 0)).catch(() => {});
+  useEffect(() => { load(); loadPending(); loadReplyPending(); }, []);
 
   const { me, cfg, loading: authLoading, can, logout, reload: reloadAuth } = useAuth();
   // 설정 화면·온보딩은 관리자 작업이다 — 권한이 없으면 강제하지 않는다.
@@ -79,14 +83,16 @@ function Shell() {
         <button onClick={() => go({ view: "app" })} title="홈(분석 화면)으로"
           className="mr-4 text-left outline-none focus-visible:ring-1 focus-visible:ring-sky-500 rounded">
           <span className="block text-sm font-semibold tracking-tight text-zinc-50">VOC Agent</span>
-          <span className="block text-[11px] text-zinc-400">고객 문의(VOC) 답변 — 과거 해결 사례 기반</span>
+          <span className="block text-[11px] text-zinc-400">고객 문의(VOC) 대응 — 답변 생성 · 검토 · 발송</span>
         </button>
-        {navItem("app", "◎", "분석", "미해결 이슈의 근본원인·해결책 추천")}
-        {status?.ready && navItem("dashboard", "▤", "VOC 답변 현황", "초안 품질(무수정 게시율·결함 원인) + KB 구성·품질·공백")}
+        {navItem("app", "◎", "VOC 대응", "고객 문의에 보낼 답변을 만들고 검토·발송")}
+        {status?.ready && navItem("dashboard", "▤", "현황", "고객 답변 품질 + 그 답변을 떠받치는 지식 자산")}
         {status?.ready && !showOnboarding && (
           <div className="ml-auto flex items-center gap-1">
-            {can("rca.read") && navItem("rca", "↗", "승인 대기", "RCA 댓글 승인 대기 (HITL)",
+            {can("rca.read") && navItem("rca", "↗", "RCA 승인", "엔지니어용 RCA 댓글 승인 대기 (HITL)",
               () => { go({ view: route.view === "rca" ? "app" : "rca" }); loadPending(); }, pending)}
+            {can("reply.read") && navItem("reply", "📮", "고객 답변", "고객에게 보낼 답변 발송 대기 (HITL)",
+              () => { go({ view: route.view === "reply" ? "app" : "reply" }); loadReplyPending(); }, replyPending)}
             {can("voc.manage") && navItem("voc", "✎", "VOC", "서비스 의견 (VOC)",
               () => go({ view: route.view === "voc" ? "app" : "voc" }))}
             {isAdmin && navItem("settings", "⚙", "설정", "설정 변경")}
@@ -120,6 +126,8 @@ function Shell() {
           <Onboarding status={status} onDone={() => load(true)} myEmail={me?.subject ?? ""} authReady={!!status?.ready} />
         ) : route.view === "rca" ? (
           <RcaQueue onBack={() => { go({ view: "app" }); loadPending(); }} onChange={loadPending} />
+        ) : route.view === "reply" ? (
+          <ReplyQueue onBack={() => { go({ view: "app" }); loadReplyPending(); }} onChange={loadReplyPending} />
         ) : route.view === "voc" ? (
           <VocPage onBack={() => go({ view: "app" })} />
         ) : route.view === "dashboard" ? (
