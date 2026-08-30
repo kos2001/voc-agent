@@ -580,6 +580,28 @@ def test_spelling_warn() -> None:
           V.check("안녕하세요 ㅋ 안내드리겠습니다.")["blocked"] is False)
 
 
+def test_selfcheck_liveness() -> None:
+    """자기개선 loop 이 **도는지**를 화면이 알 수 있어야 한다.
+
+    예전에는 대시보드가 loop 의 *결과*(개선 큐)만 보여줬다. 그래서 launchd 가
+    리네임 전 경로를 가리켜 나흘간 아무 일도 하지 않았는데 화면이 똑같았다.
+    돌지 않는 자동화는 없는 자동화보다 나쁘다 — 있다고 믿게 만들기 때문이다.
+    """
+    print("\n[자기개선 loop 생존 확인]")
+    server, c = _client()
+    _login(c, "eng@example.com")
+    d = c.get("/selfcheck/status").json()
+    check("마지막 실행 시각을 안다", "last_run" in d and "age_hours" in d, str(d)[:160])
+    check("지연 판정을 함께 준다", "stale" in d and "max_age_hours" in d)
+    check("큐 현황도 함께", isinstance(d.get("queue"), dict))
+    check("스케줄러가 무엇인지 알려준다", bool(d.get("scheduler_hint")))
+    # 판정은 산출물(리포트·이력)로 한다 — 스케줄러에게 묻지 않는다. 스케줄러가
+    # "등록됨" 이라고 답해도 실제로 안 돌 수 있다(그게 이번 결함이었다).
+    if d.get("age_hours") is not None:
+        check("경과 시간이 임계와 일관된다",
+              d["stale"] == (d["age_hours"] > d["max_age_hours"]), str(d)[:160])
+
+
 def test_jira_markup_conversion() -> None:
     """게시되는 것은 마크다운이 아니라 **Jira wiki markup** 이다.
 
@@ -707,7 +729,7 @@ def main() -> int:
                test_proofread_guard, test_redact, test_render, test_internal_render_and_mock, test_render_without_evidence,
                test_rma_never_promises, test_prompt_hides_internal_keys, test_evidence_scrubbing_and_canonical,
                test_language,
-               test_canonical_reply_store, test_queues_are_separate, test_endpoints, test_send_gate, test_followup_reply, test_jira_markup_conversion,
+               test_canonical_reply_store, test_queues_are_separate, test_endpoints, test_send_gate, test_followup_reply, test_jira_markup_conversion, test_selfcheck_liveness,
                test_deep_analysis_is_customer_reply, test_reply_review_axes,
                test_reply_without_evidence_still_drafts):
         fn()

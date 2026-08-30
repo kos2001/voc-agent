@@ -1002,6 +1002,26 @@ RVP_SESSION_SECRET=...   RVP_ADMIN_EMAILS=...    # 인증·권한 (위 절 참�
 OPENROUTER_API_KEY=...   OPENROUTER_MODEL=...    # LLM 엔진=agno(OpenRouter)
 ```
 
+## 자기개선 loop 자동 실행
+
+`bash scripts/setup_self_improve_cron.sh` 로 **hermes cron**(`voc-agent` 전용 프로파일)에
+두 작업을 등록한다 —
+매일 09:00 측정·제안(결정적, LLM 0원), 매주 월 09:30 **에이전트가 결과 해석**.
+상세는 `claudedocs/self_improve_cron_setup.md`.
+
+**돌지 않는 자동화는 없는 자동화보다 나쁘다** — 있다고 믿게 만들기 때문이다. 실제로
+launchd plist 가 리네임 전 경로(`lsi_error_analyzer`)를 가리켜 **나흘치 실행이 통째로
+빠졌는데**, 대시보드는 loop 의 *결과*(개선 큐)만 보여줘서 화면이 똑같았다.
+
+그래서 `GET /selfcheck/status` 와 대시보드 **"자기개선 loop"** 카드를 뒀다 — 마지막
+실행·경과·누적 실행·열린 제안, 그리고 `RVP_SELFCHECK_MAX_AGE_H`(기본 36시간)를 넘으면
+빨간 경고와 복구 명령. 판정은 **산출물**(리포트 파일·이력)로 한다. 스케줄러에게 묻지
+않는다 — "등록됨" 이라고 답해도 실제로 안 돌 수 있다.
+
+옮기면서 같은 종류의 함정을 세 번 더 밟았고 셋 다 설치 스크립트가 막는다: 프로파일이
+갈려 영원히 발화하지 않는 작업 · 전역이 아닌 **프로파일별** 스크립트 경로 · 게이트웨이가
+떠 있어야 발화한다는 것(등록 후 확인하고 안 떠 있으면 exit 2).
+
 ## 모델
 
 | 용도 | 기본값 | 설정 |
