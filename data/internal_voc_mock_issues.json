@@ -1,0 +1,1282 @@
+[
+  {
+    "key": "IVOC-1",
+    "priority": "Low",
+    "components": [
+      "Gateway"
+    ],
+    "created": "2026-06-14T09:00:00.000+0900",
+    "summary": "[api-gateway] 업스트림 커넥션 풀 고갈로 504 급증",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 김담당 (플랫폼팀)\n*서비스*: api-gateway\n*구성요소*: Gateway\n*고장 분류*: Outage\n*심각도*: Minor\n*발견일*: 2026-06-05\n\nh2. 증상 (Symptom)\n\n피크 시간대 업스트림 커넥션 풀이 소진되며 504 Gateway Timeout 비율 12%.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nupstream_error: connect ETIMEDOUT; pool exhausted (in_use=200/200)\n{code}\n",
+    "labels": [
+      "Outage",
+      "api-gateway",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.yoon)\n\n*디버깅 접근*: 풀 사용량 메트릭과 업스트림 RST 타이밍을 겹쳐 보고 죽은 커넥션 잔존을 특정.\n\n*근본 원인 (Root Cause)*:\n업스트림 keep-alive 타임아웃이 게이트웨이보다 짧아 죽은 커넥션이 풀에 남았다.\n\n*적용 해결책 (Resolution)*:\n게이트웨이 idle timeout 을 업스트림보다 짧게 조정하고 풀 크기를 200→400 으로 상향.\n\n*임시 우회책 (Workaround)*:\n영향받은 화면은 CLI(`svc report --csv`)로 같은 데이터를 받을 수 있다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-2",
+    "priority": "Medium",
+    "components": [
+      "Auth"
+    ],
+    "created": "2026-06-04T12:00:00.000+0900",
+    "summary": "[internal-portal] SSO 그룹 동기화 지연으로 신규 입사자 권한 미반영",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 정테스트 (QA)\n*서비스*: internal-portal\n*구성요소*: Auth\n*고장 분류*: Access\n*심각도*: Major\n*발견일*: 2026-05-27\n\nh2. 증상 (Symptom)\n\nIdP 그룹 변경이 최대 6시간 뒤에 반영되어 신규 계정이 403 을 받는다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nauthz: subject=new.member group=[] required=stg-readers -> 403\n{code}\n",
+    "labels": [
+      "Access",
+      "internal-portal",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.jo)\n\n*디버깅 접근*: IdP 감사 로그와 포털 authz 로그의 시각차를 대조.\n\n*근본 원인 (Root Cause)*:\n그룹 동기화가 6시간 배치라 입사 당일 반영되지 않는다.\n\n*적용 해결책 (Resolution)*:\n그룹 변경 웹훅을 받아 즉시 반영하도록 변경, 배치는 대조용으로만 유지.\n\n*임시 우회책 (Workaround)*:\n긴급 시 포털 '권한 즉시 동기화' 버튼으로 본인 그룹만 갱신할 수 있다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-3",
+    "priority": "High",
+    "components": [
+      "ETL"
+    ],
+    "created": "2026-08-09T13:00:00.000+0900",
+    "summary": "[data-platform] 일일 집계 배치가 소스 지연으로 오전 리포트 누락",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 정테스트 (QA)\n*서비스*: data-platform\n*구성요소*: ETL\n*고장 분류*: Data\n*심각도*: Critical\n*발견일*: 2026-08-06\n\nh2. 증상 (Symptom)\n\n소스 테이블 적재가 03:20 이후로 밀리면 04:00 배치가 빈 파티션을 읽는다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\ndag=daily_agg partition=2026-08-29 rows=0 upstream_ready=false\n{code}\n",
+    "labels": [
+      "Data",
+      "data-platform",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.jo)\n\n*디버깅 접근*: 적재 완료 시각과 DAG 실행 시각을 2주치 비교.\n\n*근본 원인 (Root Cause)*:\n배치가 소스 준비 여부를 확인하지 않고 시각만 보고 돈다.\n\n*적용 해결책 (Resolution)*:\n업스트림 준비 센서를 붙이고, 미준비 시 재시도 후 실패로 끝내도록 변경.\n\n*임시 우회책 (Workaround)*:\n`svc backfill --date <날짜>` 로 해당 파티션만 재적재할 수 있다(약 15분).\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-4",
+    "priority": "Medium",
+    "components": [
+      "Frontend"
+    ],
+    "created": "2026-07-02T14:00:00.000+0900",
+    "summary": "[internal-portal] 목록 화면 N+1 조회로 응답 8초",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 이요청 (데이터팀)\n*서비스*: internal-portal\n*구성요소*: Frontend\n*고장 분류*: Performance\n*심각도*: Major\n*발견일*: 2026-06-29\n\nh2. 증상 (Symptom)\n\n필터가 걸린 목록에서 행마다 상세 조회가 발생해 p95 8.2초.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nGET /items?team=... 8213ms (queries=214)\n{code}\n",
+    "labels": [
+      "Performance",
+      "internal-portal",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.yoon)\n\n*디버깅 접근*: 요청당 쿼리 수를 APM 에서 확인해 N+1 확정.\n\n*근본 원인 (Root Cause)*:\n목록 직렬화가 행마다 상세를 다시 조회한다(N+1).\n\n*적용 해결책 (Resolution)*:\n조인 한 번으로 묶고 목록 응답에 필요한 필드만 남김. p95 8.2s → 0.6s.\n\n*임시 우회책 (Workaround)*:\n필터를 좁히거나 페이지 크기를 50 이하로 두면 체감이 크게 줄어든다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-5",
+    "priority": "Medium",
+    "components": [
+      "CI/CD"
+    ],
+    "created": "2026-06-09T09:00:00.000+0900",
+    "summary": "[release-bot] 배포 후 구버전 설정이 남아 기능 플래그 불일치",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 이요청 (데이터팀)\n*서비스*: release-bot\n*구성요소*: CI/CD\n*고장 분류*: Deploy\n*심각도*: Major\n*발견일*: 2026-05-30\n\nh2. 증상 (Symptom)\n\n설정 리로드가 일부 파드에서만 적용되어 플래그가 인스턴스마다 다르다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nconfig_reload: applied=7/12 pods; flag=new_editor mismatch\n{code}\n",
+    "labels": [
+      "Deploy",
+      "release-bot",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.jo)\n\n*디버깅 접근*: 파드별 설정 해시를 수집해 불일치 파드를 특정.\n\n*근본 원인 (Root Cause)*:\n설정 리로드가 롤링 중 종료되는 파드에서 유실된다.\n\n*적용 해결책 (Resolution)*:\n리로드를 배포 완료 훅으로 옮기고 적용 결과를 파드별로 확인하도록 변경.\n\n*임시 우회책 (Workaround)*:\n`svc config sync --service <이름>` 으로 즉시 전체 재적용할 수 있다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-6",
+    "priority": "Low",
+    "components": [
+      "Quota"
+    ],
+    "created": "2026-06-22T13:00:00.000+0900",
+    "summary": "[api-gateway] 팀 단위 쿼터가 없어 한 팀의 배치가 전체 지연 유발",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 이요청 (데이터팀)\n*서비스*: api-gateway\n*구성요소*: Quota\n*고장 분류*: Feature\n*심각도*: Minor\n*발견일*: 2026-06-14\n\nh2. 증상 (Symptom)\n\n쿼터가 전역 하나뿐이라 특정 팀의 배치가 다른 팀 응답을 밀어낸다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\n429 Too Many Requests: quota=global remaining=0\n{code}\n",
+    "labels": [
+      "Feature",
+      "api-gateway",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.yoon)\n\n*디버깅 접근*: 429 발생 시각과 팀별 호출량을 대조해 특정 팀 배치와 일치함을 확인.\n\n*근본 원인 (Root Cause)*:\n쿼터 모델이 전역 단일이라 팀별 분리가 불가능하다.\n\n*적용 해결책 (Resolution)*:\n팀 단위 쿼터를 도입하고 기본값을 팀별로 배분, 상향은 신청 절차로 처리.\n\n*임시 우회책 (Workaround)*:\n배치를 야간 시간대로 옮기면 한도에 걸리지 않는다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-7",
+    "priority": "Low",
+    "components": [
+      "Gateway"
+    ],
+    "created": "2026-07-17T10:00:00.000+0900",
+    "summary": "[api-gateway] 업스트림 커넥션 풀 고갈로 504 급증",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 이요청 (데이터팀)\n*서비스*: api-gateway\n*구성요소*: Gateway\n*고장 분류*: Outage\n*심각도*: Minor\n*발견일*: 2026-07-12\n\nh2. 증상 (Symptom)\n\n피크 시간대 업스트림 커넥션 풀이 소진되며 504 Gateway Timeout 비율 12%.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nupstream_error: connect ETIMEDOUT; pool exhausted (in_use=200/200)\n{code}\n",
+    "labels": [
+      "Outage",
+      "api-gateway",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.baek)\n\n*디버깅 접근*: 풀 사용량 메트릭과 업스트림 RST 타이밍을 겹쳐 보고 죽은 커넥션 잔존을 특정.\n\n*근본 원인 (Root Cause)*:\n업스트림 keep-alive 타임아웃이 게이트웨이보다 짧아 죽은 커넥션이 풀에 남았다.\n\n*적용 해결책 (Resolution)*:\n게이트웨이 idle timeout 을 업스트림보다 짧게 조정하고 풀 크기를 200→400 으로 상향.\n\n*임시 우회책 (Workaround)*:\n영향받은 화면은 CLI(`svc report --csv`)로 같은 데이터를 받을 수 있다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-8",
+    "priority": "High",
+    "components": [
+      "Auth"
+    ],
+    "created": "2026-08-10T09:00:00.000+0900",
+    "summary": "[internal-portal] SSO 그룹 동기화 지연으로 신규 입사자 권한 미반영",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 김담당 (플랫폼팀)\n*서비스*: internal-portal\n*구성요소*: Auth\n*고장 분류*: Access\n*심각도*: Critical\n*발견일*: 2026-08-07\n\nh2. 증상 (Symptom)\n\nIdP 그룹 변경이 최대 6시간 뒤에 반영되어 신규 계정이 403 을 받는다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nauthz: subject=new.member group=[] required=stg-readers -> 403\n{code}\n",
+    "labels": [
+      "Access",
+      "internal-portal",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.baek)\n\n*디버깅 접근*: IdP 감사 로그와 포털 authz 로그의 시각차를 대조.\n\n*근본 원인 (Root Cause)*:\n그룹 동기화가 6시간 배치라 입사 당일 반영되지 않는다.\n\n*적용 해결책 (Resolution)*:\n그룹 변경 웹훅을 받아 즉시 반영하도록 변경, 배치는 대조용으로만 유지.\n\n*임시 우회책 (Workaround)*:\n긴급 시 포털 '권한 즉시 동기화' 버튼으로 본인 그룹만 갱신할 수 있다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-9",
+    "priority": "Medium",
+    "components": [
+      "ETL"
+    ],
+    "created": "2026-07-08T13:00:00.000+0900",
+    "summary": "[data-platform] 일일 집계 배치가 소스 지연으로 오전 리포트 누락",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 김담당 (플랫폼팀)\n*서비스*: data-platform\n*구성요소*: ETL\n*고장 분류*: Data\n*심각도*: Major\n*발견일*: 2026-07-05\n\nh2. 증상 (Symptom)\n\n소스 테이블 적재가 03:20 이후로 밀리면 04:00 배치가 빈 파티션을 읽는다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\ndag=daily_agg partition=2026-08-29 rows=0 upstream_ready=false\n{code}\n",
+    "labels": [
+      "Data",
+      "data-platform",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.yoon)\n\n*디버깅 접근*: 적재 완료 시각과 DAG 실행 시각을 2주치 비교.\n\n*근본 원인 (Root Cause)*:\n배치가 소스 준비 여부를 확인하지 않고 시각만 보고 돈다.\n\n*적용 해결책 (Resolution)*:\n업스트림 준비 센서를 붙이고, 미준비 시 재시도 후 실패로 끝내도록 변경.\n\n*임시 우회책 (Workaround)*:\n`svc backfill --date <날짜>` 로 해당 파티션만 재적재할 수 있다(약 15분).\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-10",
+    "priority": "Highest",
+    "components": [
+      "Frontend"
+    ],
+    "created": "2026-08-14T12:00:00.000+0900",
+    "summary": "[internal-portal] 목록 화면 N+1 조회로 응답 8초",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 정테스트 (QA)\n*서비스*: internal-portal\n*구성요소*: Frontend\n*고장 분류*: Performance\n*심각도*: Blocker\n*발견일*: 2026-08-13\n\nh2. 증상 (Symptom)\n\n필터가 걸린 목록에서 행마다 상세 조회가 발생해 p95 8.2초.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nGET /items?team=... 8213ms (queries=214)\n{code}\n",
+    "labels": [
+      "Performance",
+      "internal-portal",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.jo)\n\n*디버깅 접근*: 요청당 쿼리 수를 APM 에서 확인해 N+1 확정.\n\n*근본 원인 (Root Cause)*:\n목록 직렬화가 행마다 상세를 다시 조회한다(N+1).\n\n*적용 해결책 (Resolution)*:\n조인 한 번으로 묶고 목록 응답에 필요한 필드만 남김. p95 8.2s → 0.6s.\n\n*임시 우회책 (Workaround)*:\n필터를 좁히거나 페이지 크기를 50 이하로 두면 체감이 크게 줄어든다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-11",
+    "priority": "Low",
+    "components": [
+      "CI/CD"
+    ],
+    "created": "2026-06-19T14:00:00.000+0900",
+    "summary": "[release-bot] 배포 후 구버전 설정이 남아 기능 플래그 불일치",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 이요청 (데이터팀)\n*서비스*: release-bot\n*구성요소*: CI/CD\n*고장 분류*: Deploy\n*심각도*: Minor\n*발견일*: 2026-06-18\n\nh2. 증상 (Symptom)\n\n설정 리로드가 일부 파드에서만 적용되어 플래그가 인스턴스마다 다르다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nconfig_reload: applied=7/12 pods; flag=new_editor mismatch\n{code}\n",
+    "labels": [
+      "Deploy",
+      "release-bot",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.han)\n\n*디버깅 접근*: 파드별 설정 해시를 수집해 불일치 파드를 특정.\n\n*근본 원인 (Root Cause)*:\n설정 리로드가 롤링 중 종료되는 파드에서 유실된다.\n\n*적용 해결책 (Resolution)*:\n리로드를 배포 완료 훅으로 옮기고 적용 결과를 파드별로 확인하도록 변경.\n\n*임시 우회책 (Workaround)*:\n`svc config sync --service <이름>` 으로 즉시 전체 재적용할 수 있다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-12",
+    "priority": "Highest",
+    "components": [
+      "Quota"
+    ],
+    "created": "2026-08-19T17:00:00.000+0900",
+    "summary": "[api-gateway] 팀 단위 쿼터가 없어 한 팀의 배치가 전체 지연 유발",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 정테스트 (QA)\n*서비스*: api-gateway\n*구성요소*: Quota\n*고장 분류*: Feature\n*심각도*: Blocker\n*발견일*: 2026-08-16\n\nh2. 증상 (Symptom)\n\n쿼터가 전역 하나뿐이라 특정 팀의 배치가 다른 팀 응답을 밀어낸다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\n429 Too Many Requests: quota=global remaining=0\n{code}\n",
+    "labels": [
+      "Feature",
+      "api-gateway",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.yoon)\n\n*디버깅 접근*: 429 발생 시각과 팀별 호출량을 대조해 특정 팀 배치와 일치함을 확인.\n\n*근본 원인 (Root Cause)*:\n쿼터 모델이 전역 단일이라 팀별 분리가 불가능하다.\n\n*적용 해결책 (Resolution)*:\n팀 단위 쿼터를 도입하고 기본값을 팀별로 배분, 상향은 신청 절차로 처리.\n\n*임시 우회책 (Workaround)*:\n배치를 야간 시간대로 옮기면 한도에 걸리지 않는다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-13",
+    "priority": "Medium",
+    "components": [
+      "Gateway"
+    ],
+    "created": "2026-08-12T15:00:00.000+0900",
+    "summary": "[api-gateway] 업스트림 커넥션 풀 고갈로 504 급증",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 최기획 (프로덕트)\n*서비스*: api-gateway\n*구성요소*: Gateway\n*고장 분류*: Outage\n*심각도*: Major\n*발견일*: 2026-08-10\n\nh2. 증상 (Symptom)\n\n피크 시간대 업스트림 커넥션 풀이 소진되며 504 Gateway Timeout 비율 12%.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nupstream_error: connect ETIMEDOUT; pool exhausted (in_use=200/200)\n{code}\n",
+    "labels": [
+      "Outage",
+      "api-gateway",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.han)\n\n*디버깅 접근*: 풀 사용량 메트릭과 업스트림 RST 타이밍을 겹쳐 보고 죽은 커넥션 잔존을 특정.\n\n*근본 원인 (Root Cause)*:\n업스트림 keep-alive 타임아웃이 게이트웨이보다 짧아 죽은 커넥션이 풀에 남았다.\n\n*적용 해결책 (Resolution)*:\n게이트웨이 idle timeout 을 업스트림보다 짧게 조정하고 풀 크기를 200→400 으로 상향.\n\n*임시 우회책 (Workaround)*:\n영향받은 화면은 CLI(`svc report --csv`)로 같은 데이터를 받을 수 있다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-14",
+    "priority": "High",
+    "components": [
+      "Auth"
+    ],
+    "created": "2026-08-12T12:00:00.000+0900",
+    "summary": "[internal-portal] SSO 그룹 동기화 지연으로 신규 입사자 권한 미반영",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 박운영 (SRE)\n*서비스*: internal-portal\n*구성요소*: Auth\n*고장 분류*: Access\n*심각도*: Critical\n*발견일*: 2026-08-07\n\nh2. 증상 (Symptom)\n\nIdP 그룹 변경이 최대 6시간 뒤에 반영되어 신규 계정이 403 을 받는다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nauthz: subject=new.member group=[] required=stg-readers -> 403\n{code}\n",
+    "labels": [
+      "Access",
+      "internal-portal",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.jo)\n\n*디버깅 접근*: IdP 감사 로그와 포털 authz 로그의 시각차를 대조.\n\n*근본 원인 (Root Cause)*:\n그룹 동기화가 6시간 배치라 입사 당일 반영되지 않는다.\n\n*적용 해결책 (Resolution)*:\n그룹 변경 웹훅을 받아 즉시 반영하도록 변경, 배치는 대조용으로만 유지.\n\n*임시 우회책 (Workaround)*:\n긴급 시 포털 '권한 즉시 동기화' 버튼으로 본인 그룹만 갱신할 수 있다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-15",
+    "priority": "Medium",
+    "components": [
+      "ETL"
+    ],
+    "created": "2026-06-05T15:00:00.000+0900",
+    "summary": "[data-platform] 일일 집계 배치가 소스 지연으로 오전 리포트 누락",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 김담당 (플랫폼팀)\n*서비스*: data-platform\n*구성요소*: ETL\n*고장 분류*: Data\n*심각도*: Major\n*발견일*: 2026-06-04\n\nh2. 증상 (Symptom)\n\n소스 테이블 적재가 03:20 이후로 밀리면 04:00 배치가 빈 파티션을 읽는다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\ndag=daily_agg partition=2026-08-29 rows=0 upstream_ready=false\n{code}\n",
+    "labels": [
+      "Data",
+      "data-platform",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.yoon)\n\n*디버깅 접근*: 적재 완료 시각과 DAG 실행 시각을 2주치 비교.\n\n*근본 원인 (Root Cause)*:\n배치가 소스 준비 여부를 확인하지 않고 시각만 보고 돈다.\n\n*적용 해결책 (Resolution)*:\n업스트림 준비 센서를 붙이고, 미준비 시 재시도 후 실패로 끝내도록 변경.\n\n*임시 우회책 (Workaround)*:\n`svc backfill --date <날짜>` 로 해당 파티션만 재적재할 수 있다(약 15분).\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-16",
+    "priority": "High",
+    "components": [
+      "Frontend"
+    ],
+    "created": "2026-08-18T15:00:00.000+0900",
+    "summary": "[internal-portal] 목록 화면 N+1 조회로 응답 8초",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 이요청 (데이터팀)\n*서비스*: internal-portal\n*구성요소*: Frontend\n*고장 분류*: Performance\n*심각도*: Critical\n*발견일*: 2026-08-17\n\nh2. 증상 (Symptom)\n\n필터가 걸린 목록에서 행마다 상세 조회가 발생해 p95 8.2초.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nGET /items?team=... 8213ms (queries=214)\n{code}\n",
+    "labels": [
+      "Performance",
+      "internal-portal",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.yoon)\n\n*디버깅 접근*: 요청당 쿼리 수를 APM 에서 확인해 N+1 확정.\n\n*근본 원인 (Root Cause)*:\n목록 직렬화가 행마다 상세를 다시 조회한다(N+1).\n\n*적용 해결책 (Resolution)*:\n조인 한 번으로 묶고 목록 응답에 필요한 필드만 남김. p95 8.2s → 0.6s.\n\n*임시 우회책 (Workaround)*:\n필터를 좁히거나 페이지 크기를 50 이하로 두면 체감이 크게 줄어든다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-17",
+    "priority": "Highest",
+    "components": [
+      "CI/CD"
+    ],
+    "created": "2026-07-07T15:00:00.000+0900",
+    "summary": "[release-bot] 배포 후 구버전 설정이 남아 기능 플래그 불일치",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 김담당 (플랫폼팀)\n*서비스*: release-bot\n*구성요소*: CI/CD\n*고장 분류*: Deploy\n*심각도*: Blocker\n*발견일*: 2026-07-06\n\nh2. 증상 (Symptom)\n\n설정 리로드가 일부 파드에서만 적용되어 플래그가 인스턴스마다 다르다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nconfig_reload: applied=7/12 pods; flag=new_editor mismatch\n{code}\n",
+    "labels": [
+      "Deploy",
+      "release-bot",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.jo)\n\n*디버깅 접근*: 파드별 설정 해시를 수집해 불일치 파드를 특정.\n\n*근본 원인 (Root Cause)*:\n설정 리로드가 롤링 중 종료되는 파드에서 유실된다.\n\n*적용 해결책 (Resolution)*:\n리로드를 배포 완료 훅으로 옮기고 적용 결과를 파드별로 확인하도록 변경.\n\n*임시 우회책 (Workaround)*:\n`svc config sync --service <이름>` 으로 즉시 전체 재적용할 수 있다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-18",
+    "priority": "Highest",
+    "components": [
+      "Quota"
+    ],
+    "created": "2026-07-28T15:00:00.000+0900",
+    "summary": "[api-gateway] 팀 단위 쿼터가 없어 한 팀의 배치가 전체 지연 유발",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 이요청 (데이터팀)\n*서비스*: api-gateway\n*구성요소*: Quota\n*고장 분류*: Feature\n*심각도*: Blocker\n*발견일*: 2026-07-26\n\nh2. 증상 (Symptom)\n\n쿼터가 전역 하나뿐이라 특정 팀의 배치가 다른 팀 응답을 밀어낸다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\n429 Too Many Requests: quota=global remaining=0\n{code}\n",
+    "labels": [
+      "Feature",
+      "api-gateway",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.yoon)\n\n*디버깅 접근*: 429 발생 시각과 팀별 호출량을 대조해 특정 팀 배치와 일치함을 확인.\n\n*근본 원인 (Root Cause)*:\n쿼터 모델이 전역 단일이라 팀별 분리가 불가능하다.\n\n*적용 해결책 (Resolution)*:\n팀 단위 쿼터를 도입하고 기본값을 팀별로 배분, 상향은 신청 절차로 처리.\n\n*임시 우회책 (Workaround)*:\n배치를 야간 시간대로 옮기면 한도에 걸리지 않는다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-19",
+    "priority": "Medium",
+    "components": [
+      "Gateway"
+    ],
+    "created": "2026-08-10T12:00:00.000+0900",
+    "summary": "[api-gateway] 업스트림 커넥션 풀 고갈로 504 급증",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 김담당 (플랫폼팀)\n*서비스*: api-gateway\n*구성요소*: Gateway\n*고장 분류*: Outage\n*심각도*: Major\n*발견일*: 2026-08-03\n\nh2. 증상 (Symptom)\n\n피크 시간대 업스트림 커넥션 풀이 소진되며 504 Gateway Timeout 비율 12%.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nupstream_error: connect ETIMEDOUT; pool exhausted (in_use=200/200)\n{code}\n",
+    "labels": [
+      "Outage",
+      "api-gateway",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.han)\n\n*디버깅 접근*: 풀 사용량 메트릭과 업스트림 RST 타이밍을 겹쳐 보고 죽은 커넥션 잔존을 특정.\n\n*근본 원인 (Root Cause)*:\n업스트림 keep-alive 타임아웃이 게이트웨이보다 짧아 죽은 커넥션이 풀에 남았다.\n\n*적용 해결책 (Resolution)*:\n게이트웨이 idle timeout 을 업스트림보다 짧게 조정하고 풀 크기를 200→400 으로 상향.\n\n*임시 우회책 (Workaround)*:\n영향받은 화면은 CLI(`svc report --csv`)로 같은 데이터를 받을 수 있다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-20",
+    "priority": "Low",
+    "components": [
+      "Auth"
+    ],
+    "created": "2026-08-05T17:00:00.000+0900",
+    "summary": "[internal-portal] SSO 그룹 동기화 지연으로 신규 입사자 권한 미반영",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 정테스트 (QA)\n*서비스*: internal-portal\n*구성요소*: Auth\n*고장 분류*: Access\n*심각도*: Minor\n*발견일*: 2026-08-02\n\nh2. 증상 (Symptom)\n\nIdP 그룹 변경이 최대 6시간 뒤에 반영되어 신규 계정이 403 을 받는다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nauthz: subject=new.member group=[] required=stg-readers -> 403\n{code}\n",
+    "labels": [
+      "Access",
+      "internal-portal",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.baek)\n\n*디버깅 접근*: IdP 감사 로그와 포털 authz 로그의 시각차를 대조.\n\n*근본 원인 (Root Cause)*:\n그룹 동기화가 6시간 배치라 입사 당일 반영되지 않는다.\n\n*적용 해결책 (Resolution)*:\n그룹 변경 웹훅을 받아 즉시 반영하도록 변경, 배치는 대조용으로만 유지.\n\n*임시 우회책 (Workaround)*:\n긴급 시 포털 '권한 즉시 동기화' 버튼으로 본인 그룹만 갱신할 수 있다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-21",
+    "priority": "Medium",
+    "components": [
+      "ETL"
+    ],
+    "created": "2026-07-10T13:00:00.000+0900",
+    "summary": "[data-platform] 일일 집계 배치가 소스 지연으로 오전 리포트 누락",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 최기획 (프로덕트)\n*서비스*: data-platform\n*구성요소*: ETL\n*고장 분류*: Data\n*심각도*: Major\n*발견일*: 2026-07-09\n\nh2. 증상 (Symptom)\n\n소스 테이블 적재가 03:20 이후로 밀리면 04:00 배치가 빈 파티션을 읽는다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\ndag=daily_agg partition=2026-08-29 rows=0 upstream_ready=false\n{code}\n",
+    "labels": [
+      "Data",
+      "data-platform",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.baek)\n\n*디버깅 접근*: 적재 완료 시각과 DAG 실행 시각을 2주치 비교.\n\n*근본 원인 (Root Cause)*:\n배치가 소스 준비 여부를 확인하지 않고 시각만 보고 돈다.\n\n*적용 해결책 (Resolution)*:\n업스트림 준비 센서를 붙이고, 미준비 시 재시도 후 실패로 끝내도록 변경.\n\n*임시 우회책 (Workaround)*:\n`svc backfill --date <날짜>` 로 해당 파티션만 재적재할 수 있다(약 15분).\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-22",
+    "priority": "Low",
+    "components": [
+      "Frontend"
+    ],
+    "created": "2026-06-06T16:00:00.000+0900",
+    "summary": "[internal-portal] 목록 화면 N+1 조회로 응답 8초",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 최기획 (프로덕트)\n*서비스*: internal-portal\n*구성요소*: Frontend\n*고장 분류*: Performance\n*심각도*: Minor\n*발견일*: 2026-05-28\n\nh2. 증상 (Symptom)\n\n필터가 걸린 목록에서 행마다 상세 조회가 발생해 p95 8.2초.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nGET /items?team=... 8213ms (queries=214)\n{code}\n",
+    "labels": [
+      "Performance",
+      "internal-portal",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.baek)\n\n*디버깅 접근*: 요청당 쿼리 수를 APM 에서 확인해 N+1 확정.\n\n*근본 원인 (Root Cause)*:\n목록 직렬화가 행마다 상세를 다시 조회한다(N+1).\n\n*적용 해결책 (Resolution)*:\n조인 한 번으로 묶고 목록 응답에 필요한 필드만 남김. p95 8.2s → 0.6s.\n\n*임시 우회책 (Workaround)*:\n필터를 좁히거나 페이지 크기를 50 이하로 두면 체감이 크게 줄어든다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-23",
+    "priority": "Low",
+    "components": [
+      "CI/CD"
+    ],
+    "created": "2026-06-04T14:00:00.000+0900",
+    "summary": "[release-bot] 배포 후 구버전 설정이 남아 기능 플래그 불일치",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 정테스트 (QA)\n*서비스*: release-bot\n*구성요소*: CI/CD\n*고장 분류*: Deploy\n*심각도*: Minor\n*발견일*: 2026-05-30\n\nh2. 증상 (Symptom)\n\n설정 리로드가 일부 파드에서만 적용되어 플래그가 인스턴스마다 다르다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nconfig_reload: applied=7/12 pods; flag=new_editor mismatch\n{code}\n",
+    "labels": [
+      "Deploy",
+      "release-bot",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.baek)\n\n*디버깅 접근*: 파드별 설정 해시를 수집해 불일치 파드를 특정.\n\n*근본 원인 (Root Cause)*:\n설정 리로드가 롤링 중 종료되는 파드에서 유실된다.\n\n*적용 해결책 (Resolution)*:\n리로드를 배포 완료 훅으로 옮기고 적용 결과를 파드별로 확인하도록 변경.\n\n*임시 우회책 (Workaround)*:\n`svc config sync --service <이름>` 으로 즉시 전체 재적용할 수 있다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-24",
+    "priority": "High",
+    "components": [
+      "Quota"
+    ],
+    "created": "2026-07-13T16:00:00.000+0900",
+    "summary": "[api-gateway] 팀 단위 쿼터가 없어 한 팀의 배치가 전체 지연 유발",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 정테스트 (QA)\n*서비스*: api-gateway\n*구성요소*: Quota\n*고장 분류*: Feature\n*심각도*: Critical\n*발견일*: 2026-07-08\n\nh2. 증상 (Symptom)\n\n쿼터가 전역 하나뿐이라 특정 팀의 배치가 다른 팀 응답을 밀어낸다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\n429 Too Many Requests: quota=global remaining=0\n{code}\n",
+    "labels": [
+      "Feature",
+      "api-gateway",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.jo)\n\n*디버깅 접근*: 429 발생 시각과 팀별 호출량을 대조해 특정 팀 배치와 일치함을 확인.\n\n*근본 원인 (Root Cause)*:\n쿼터 모델이 전역 단일이라 팀별 분리가 불가능하다.\n\n*적용 해결책 (Resolution)*:\n팀 단위 쿼터를 도입하고 기본값을 팀별로 배분, 상향은 신청 절차로 처리.\n\n*임시 우회책 (Workaround)*:\n배치를 야간 시간대로 옮기면 한도에 걸리지 않는다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-25",
+    "priority": "Medium",
+    "components": [
+      "Gateway"
+    ],
+    "created": "2026-06-08T12:00:00.000+0900",
+    "summary": "[api-gateway] 업스트림 커넥션 풀 고갈로 504 급증",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 최기획 (프로덕트)\n*서비스*: api-gateway\n*구성요소*: Gateway\n*고장 분류*: Outage\n*심각도*: Major\n*발견일*: 2026-06-03\n\nh2. 증상 (Symptom)\n\n피크 시간대 업스트림 커넥션 풀이 소진되며 504 Gateway Timeout 비율 12%.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nupstream_error: connect ETIMEDOUT; pool exhausted (in_use=200/200)\n{code}\n",
+    "labels": [
+      "Outage",
+      "api-gateway",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.han)\n\n*디버깅 접근*: 풀 사용량 메트릭과 업스트림 RST 타이밍을 겹쳐 보고 죽은 커넥션 잔존을 특정.\n\n*근본 원인 (Root Cause)*:\n업스트림 keep-alive 타임아웃이 게이트웨이보다 짧아 죽은 커넥션이 풀에 남았다.\n\n*적용 해결책 (Resolution)*:\n게이트웨이 idle timeout 을 업스트림보다 짧게 조정하고 풀 크기를 200→400 으로 상향.\n\n*임시 우회책 (Workaround)*:\n영향받은 화면은 CLI(`svc report --csv`)로 같은 데이터를 받을 수 있다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-26",
+    "priority": "Medium",
+    "components": [
+      "Auth"
+    ],
+    "created": "2026-06-27T15:00:00.000+0900",
+    "summary": "[internal-portal] SSO 그룹 동기화 지연으로 신규 입사자 권한 미반영",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 이요청 (데이터팀)\n*서비스*: internal-portal\n*구성요소*: Auth\n*고장 분류*: Access\n*심각도*: Major\n*발견일*: 2026-06-23\n\nh2. 증상 (Symptom)\n\nIdP 그룹 변경이 최대 6시간 뒤에 반영되어 신규 계정이 403 을 받는다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nauthz: subject=new.member group=[] required=stg-readers -> 403\n{code}\n",
+    "labels": [
+      "Access",
+      "internal-portal",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.jo)\n\n*디버깅 접근*: IdP 감사 로그와 포털 authz 로그의 시각차를 대조.\n\n*근본 원인 (Root Cause)*:\n그룹 동기화가 6시간 배치라 입사 당일 반영되지 않는다.\n\n*적용 해결책 (Resolution)*:\n그룹 변경 웹훅을 받아 즉시 반영하도록 변경, 배치는 대조용으로만 유지.\n\n*임시 우회책 (Workaround)*:\n긴급 시 포털 '권한 즉시 동기화' 버튼으로 본인 그룹만 갱신할 수 있다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-27",
+    "priority": "Low",
+    "components": [
+      "ETL"
+    ],
+    "created": "2026-06-01T14:00:00.000+0900",
+    "summary": "[data-platform] 일일 집계 배치가 소스 지연으로 오전 리포트 누락",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 박운영 (SRE)\n*서비스*: data-platform\n*구성요소*: ETL\n*고장 분류*: Data\n*심각도*: Minor\n*발견일*: 2026-05-29\n\nh2. 증상 (Symptom)\n\n소스 테이블 적재가 03:20 이후로 밀리면 04:00 배치가 빈 파티션을 읽는다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\ndag=daily_agg partition=2026-08-29 rows=0 upstream_ready=false\n{code}\n",
+    "labels": [
+      "Data",
+      "data-platform",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.jo)\n\n*디버깅 접근*: 적재 완료 시각과 DAG 실행 시각을 2주치 비교.\n\n*근본 원인 (Root Cause)*:\n배치가 소스 준비 여부를 확인하지 않고 시각만 보고 돈다.\n\n*적용 해결책 (Resolution)*:\n업스트림 준비 센서를 붙이고, 미준비 시 재시도 후 실패로 끝내도록 변경.\n\n*임시 우회책 (Workaround)*:\n`svc backfill --date <날짜>` 로 해당 파티션만 재적재할 수 있다(약 15분).\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-28",
+    "priority": "Highest",
+    "components": [
+      "Frontend"
+    ],
+    "created": "2026-07-21T12:00:00.000+0900",
+    "summary": "[internal-portal] 목록 화면 N+1 조회로 응답 8초",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 이요청 (데이터팀)\n*서비스*: internal-portal\n*구성요소*: Frontend\n*고장 분류*: Performance\n*심각도*: Blocker\n*발견일*: 2026-07-12\n\nh2. 증상 (Symptom)\n\n필터가 걸린 목록에서 행마다 상세 조회가 발생해 p95 8.2초.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nGET /items?team=... 8213ms (queries=214)\n{code}\n",
+    "labels": [
+      "Performance",
+      "internal-portal",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.jo)\n\n*디버깅 접근*: 요청당 쿼리 수를 APM 에서 확인해 N+1 확정.\n\n*근본 원인 (Root Cause)*:\n목록 직렬화가 행마다 상세를 다시 조회한다(N+1).\n\n*적용 해결책 (Resolution)*:\n조인 한 번으로 묶고 목록 응답에 필요한 필드만 남김. p95 8.2s → 0.6s.\n\n*임시 우회책 (Workaround)*:\n필터를 좁히거나 페이지 크기를 50 이하로 두면 체감이 크게 줄어든다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-29",
+    "priority": "High",
+    "components": [
+      "CI/CD"
+    ],
+    "created": "2026-08-06T14:00:00.000+0900",
+    "summary": "[release-bot] 배포 후 구버전 설정이 남아 기능 플래그 불일치",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 최기획 (프로덕트)\n*서비스*: release-bot\n*구성요소*: CI/CD\n*고장 분류*: Deploy\n*심각도*: Critical\n*발견일*: 2026-08-05\n\nh2. 증상 (Symptom)\n\n설정 리로드가 일부 파드에서만 적용되어 플래그가 인스턴스마다 다르다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nconfig_reload: applied=7/12 pods; flag=new_editor mismatch\n{code}\n",
+    "labels": [
+      "Deploy",
+      "release-bot",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.jo)\n\n*디버깅 접근*: 파드별 설정 해시를 수집해 불일치 파드를 특정.\n\n*근본 원인 (Root Cause)*:\n설정 리로드가 롤링 중 종료되는 파드에서 유실된다.\n\n*적용 해결책 (Resolution)*:\n리로드를 배포 완료 훅으로 옮기고 적용 결과를 파드별로 확인하도록 변경.\n\n*임시 우회책 (Workaround)*:\n`svc config sync --service <이름>` 으로 즉시 전체 재적용할 수 있다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-30",
+    "priority": "High",
+    "components": [
+      "Quota"
+    ],
+    "created": "2026-06-06T14:00:00.000+0900",
+    "summary": "[api-gateway] 팀 단위 쿼터가 없어 한 팀의 배치가 전체 지연 유발",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 김담당 (플랫폼팀)\n*서비스*: api-gateway\n*구성요소*: Quota\n*고장 분류*: Feature\n*심각도*: Critical\n*발견일*: 2026-05-31\n\nh2. 증상 (Symptom)\n\n쿼터가 전역 하나뿐이라 특정 팀의 배치가 다른 팀 응답을 밀어낸다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\n429 Too Many Requests: quota=global remaining=0\n{code}\n",
+    "labels": [
+      "Feature",
+      "api-gateway",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.baek)\n\n*디버깅 접근*: 429 발생 시각과 팀별 호출량을 대조해 특정 팀 배치와 일치함을 확인.\n\n*근본 원인 (Root Cause)*:\n쿼터 모델이 전역 단일이라 팀별 분리가 불가능하다.\n\n*적용 해결책 (Resolution)*:\n팀 단위 쿼터를 도입하고 기본값을 팀별로 배분, 상향은 신청 절차로 처리.\n\n*임시 우회책 (Workaround)*:\n배치를 야간 시간대로 옮기면 한도에 걸리지 않는다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-31",
+    "priority": "Low",
+    "components": [
+      "Gateway"
+    ],
+    "created": "2026-06-19T13:00:00.000+0900",
+    "summary": "[api-gateway] 업스트림 커넥션 풀 고갈로 504 급증",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 이요청 (데이터팀)\n*서비스*: api-gateway\n*구성요소*: Gateway\n*고장 분류*: Outage\n*심각도*: Minor\n*발견일*: 2026-06-16\n\nh2. 증상 (Symptom)\n\n피크 시간대 업스트림 커넥션 풀이 소진되며 504 Gateway Timeout 비율 12%.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nupstream_error: connect ETIMEDOUT; pool exhausted (in_use=200/200)\n{code}\n",
+    "labels": [
+      "Outage",
+      "api-gateway",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.baek)\n\n*디버깅 접근*: 풀 사용량 메트릭과 업스트림 RST 타이밍을 겹쳐 보고 죽은 커넥션 잔존을 특정.\n\n*근본 원인 (Root Cause)*:\n업스트림 keep-alive 타임아웃이 게이트웨이보다 짧아 죽은 커넥션이 풀에 남았다.\n\n*적용 해결책 (Resolution)*:\n게이트웨이 idle timeout 을 업스트림보다 짧게 조정하고 풀 크기를 200→400 으로 상향.\n\n*임시 우회책 (Workaround)*:\n영향받은 화면은 CLI(`svc report --csv`)로 같은 데이터를 받을 수 있다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-32",
+    "priority": "Low",
+    "components": [
+      "Auth"
+    ],
+    "created": "2026-08-11T17:00:00.000+0900",
+    "summary": "[internal-portal] SSO 그룹 동기화 지연으로 신규 입사자 권한 미반영",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 이요청 (데이터팀)\n*서비스*: internal-portal\n*구성요소*: Auth\n*고장 분류*: Access\n*심각도*: Minor\n*발견일*: 2026-08-09\n\nh2. 증상 (Symptom)\n\nIdP 그룹 변경이 최대 6시간 뒤에 반영되어 신규 계정이 403 을 받는다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nauthz: subject=new.member group=[] required=stg-readers -> 403\n{code}\n",
+    "labels": [
+      "Access",
+      "internal-portal",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.baek)\n\n*디버깅 접근*: IdP 감사 로그와 포털 authz 로그의 시각차를 대조.\n\n*근본 원인 (Root Cause)*:\n그룹 동기화가 6시간 배치라 입사 당일 반영되지 않는다.\n\n*적용 해결책 (Resolution)*:\n그룹 변경 웹훅을 받아 즉시 반영하도록 변경, 배치는 대조용으로만 유지.\n\n*임시 우회책 (Workaround)*:\n긴급 시 포털 '권한 즉시 동기화' 버튼으로 본인 그룹만 갱신할 수 있다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-33",
+    "priority": "Medium",
+    "components": [
+      "ETL"
+    ],
+    "created": "2026-06-26T14:00:00.000+0900",
+    "summary": "[data-platform] 일일 집계 배치가 소스 지연으로 오전 리포트 누락",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 최기획 (프로덕트)\n*서비스*: data-platform\n*구성요소*: ETL\n*고장 분류*: Data\n*심각도*: Major\n*발견일*: 2026-06-20\n\nh2. 증상 (Symptom)\n\n소스 테이블 적재가 03:20 이후로 밀리면 04:00 배치가 빈 파티션을 읽는다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\ndag=daily_agg partition=2026-08-29 rows=0 upstream_ready=false\n{code}\n",
+    "labels": [
+      "Data",
+      "data-platform",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.yoon)\n\n*디버깅 접근*: 적재 완료 시각과 DAG 실행 시각을 2주치 비교.\n\n*근본 원인 (Root Cause)*:\n배치가 소스 준비 여부를 확인하지 않고 시각만 보고 돈다.\n\n*적용 해결책 (Resolution)*:\n업스트림 준비 센서를 붙이고, 미준비 시 재시도 후 실패로 끝내도록 변경.\n\n*임시 우회책 (Workaround)*:\n`svc backfill --date <날짜>` 로 해당 파티션만 재적재할 수 있다(약 15분).\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-34",
+    "priority": "Medium",
+    "components": [
+      "Frontend"
+    ],
+    "created": "2026-07-13T11:00:00.000+0900",
+    "summary": "[internal-portal] 목록 화면 N+1 조회로 응답 8초",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 정테스트 (QA)\n*서비스*: internal-portal\n*구성요소*: Frontend\n*고장 분류*: Performance\n*심각도*: Major\n*발견일*: 2026-07-04\n\nh2. 증상 (Symptom)\n\n필터가 걸린 목록에서 행마다 상세 조회가 발생해 p95 8.2초.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nGET /items?team=... 8213ms (queries=214)\n{code}\n",
+    "labels": [
+      "Performance",
+      "internal-portal",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.han)\n\n*디버깅 접근*: 요청당 쿼리 수를 APM 에서 확인해 N+1 확정.\n\n*근본 원인 (Root Cause)*:\n목록 직렬화가 행마다 상세를 다시 조회한다(N+1).\n\n*적용 해결책 (Resolution)*:\n조인 한 번으로 묶고 목록 응답에 필요한 필드만 남김. p95 8.2s → 0.6s.\n\n*임시 우회책 (Workaround)*:\n필터를 좁히거나 페이지 크기를 50 이하로 두면 체감이 크게 줄어든다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-35",
+    "priority": "Medium",
+    "components": [
+      "CI/CD"
+    ],
+    "created": "2026-06-29T09:00:00.000+0900",
+    "summary": "[release-bot] 배포 후 구버전 설정이 남아 기능 플래그 불일치",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 최기획 (프로덕트)\n*서비스*: release-bot\n*구성요소*: CI/CD\n*고장 분류*: Deploy\n*심각도*: Major\n*발견일*: 2026-06-19\n\nh2. 증상 (Symptom)\n\n설정 리로드가 일부 파드에서만 적용되어 플래그가 인스턴스마다 다르다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nconfig_reload: applied=7/12 pods; flag=new_editor mismatch\n{code}\n",
+    "labels": [
+      "Deploy",
+      "release-bot",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.yoon)\n\n*디버깅 접근*: 파드별 설정 해시를 수집해 불일치 파드를 특정.\n\n*근본 원인 (Root Cause)*:\n설정 리로드가 롤링 중 종료되는 파드에서 유실된다.\n\n*적용 해결책 (Resolution)*:\n리로드를 배포 완료 훅으로 옮기고 적용 결과를 파드별로 확인하도록 변경.\n\n*임시 우회책 (Workaround)*:\n`svc config sync --service <이름>` 으로 즉시 전체 재적용할 수 있다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-36",
+    "priority": "Medium",
+    "components": [
+      "Quota"
+    ],
+    "created": "2026-08-15T11:00:00.000+0900",
+    "summary": "[api-gateway] 팀 단위 쿼터가 없어 한 팀의 배치가 전체 지연 유발",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 정테스트 (QA)\n*서비스*: api-gateway\n*구성요소*: Quota\n*고장 분류*: Feature\n*심각도*: Major\n*발견일*: 2026-08-10\n\nh2. 증상 (Symptom)\n\n쿼터가 전역 하나뿐이라 특정 팀의 배치가 다른 팀 응답을 밀어낸다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\n429 Too Many Requests: quota=global remaining=0\n{code}\n",
+    "labels": [
+      "Feature",
+      "api-gateway",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.yoon)\n\n*디버깅 접근*: 429 발생 시각과 팀별 호출량을 대조해 특정 팀 배치와 일치함을 확인.\n\n*근본 원인 (Root Cause)*:\n쿼터 모델이 전역 단일이라 팀별 분리가 불가능하다.\n\n*적용 해결책 (Resolution)*:\n팀 단위 쿼터를 도입하고 기본값을 팀별로 배분, 상향은 신청 절차로 처리.\n\n*임시 우회책 (Workaround)*:\n배치를 야간 시간대로 옮기면 한도에 걸리지 않는다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-37",
+    "priority": "Highest",
+    "components": [
+      "Gateway"
+    ],
+    "created": "2026-07-06T11:00:00.000+0900",
+    "summary": "[api-gateway] 업스트림 커넥션 풀 고갈로 504 급증",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 박운영 (SRE)\n*서비스*: api-gateway\n*구성요소*: Gateway\n*고장 분류*: Outage\n*심각도*: Blocker\n*발견일*: 2026-07-03\n\nh2. 증상 (Symptom)\n\n피크 시간대 업스트림 커넥션 풀이 소진되며 504 Gateway Timeout 비율 12%.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nupstream_error: connect ETIMEDOUT; pool exhausted (in_use=200/200)\n{code}\n",
+    "labels": [
+      "Outage",
+      "api-gateway",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.baek)\n\n*디버깅 접근*: 풀 사용량 메트릭과 업스트림 RST 타이밍을 겹쳐 보고 죽은 커넥션 잔존을 특정.\n\n*근본 원인 (Root Cause)*:\n업스트림 keep-alive 타임아웃이 게이트웨이보다 짧아 죽은 커넥션이 풀에 남았다.\n\n*적용 해결책 (Resolution)*:\n게이트웨이 idle timeout 을 업스트림보다 짧게 조정하고 풀 크기를 200→400 으로 상향.\n\n*임시 우회책 (Workaround)*:\n영향받은 화면은 CLI(`svc report --csv`)로 같은 데이터를 받을 수 있다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-38",
+    "priority": "Low",
+    "components": [
+      "Auth"
+    ],
+    "created": "2026-07-29T15:00:00.000+0900",
+    "summary": "[internal-portal] SSO 그룹 동기화 지연으로 신규 입사자 권한 미반영",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 최기획 (프로덕트)\n*서비스*: internal-portal\n*구성요소*: Auth\n*고장 분류*: Access\n*심각도*: Minor\n*발견일*: 2026-07-21\n\nh2. 증상 (Symptom)\n\nIdP 그룹 변경이 최대 6시간 뒤에 반영되어 신규 계정이 403 을 받는다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nauthz: subject=new.member group=[] required=stg-readers -> 403\n{code}\n",
+    "labels": [
+      "Access",
+      "internal-portal",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.yoon)\n\n*디버깅 접근*: IdP 감사 로그와 포털 authz 로그의 시각차를 대조.\n\n*근본 원인 (Root Cause)*:\n그룹 동기화가 6시간 배치라 입사 당일 반영되지 않는다.\n\n*적용 해결책 (Resolution)*:\n그룹 변경 웹훅을 받아 즉시 반영하도록 변경, 배치는 대조용으로만 유지.\n\n*임시 우회책 (Workaround)*:\n긴급 시 포털 '권한 즉시 동기화' 버튼으로 본인 그룹만 갱신할 수 있다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-39",
+    "priority": "Medium",
+    "components": [
+      "ETL"
+    ],
+    "created": "2026-07-04T13:00:00.000+0900",
+    "summary": "[data-platform] 일일 집계 배치가 소스 지연으로 오전 리포트 누락",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 최기획 (프로덕트)\n*서비스*: data-platform\n*구성요소*: ETL\n*고장 분류*: Data\n*심각도*: Major\n*발견일*: 2026-07-03\n\nh2. 증상 (Symptom)\n\n소스 테이블 적재가 03:20 이후로 밀리면 04:00 배치가 빈 파티션을 읽는다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\ndag=daily_agg partition=2026-08-29 rows=0 upstream_ready=false\n{code}\n",
+    "labels": [
+      "Data",
+      "data-platform",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.yoon)\n\n*디버깅 접근*: 적재 완료 시각과 DAG 실행 시각을 2주치 비교.\n\n*근본 원인 (Root Cause)*:\n배치가 소스 준비 여부를 확인하지 않고 시각만 보고 돈다.\n\n*적용 해결책 (Resolution)*:\n업스트림 준비 센서를 붙이고, 미준비 시 재시도 후 실패로 끝내도록 변경.\n\n*임시 우회책 (Workaround)*:\n`svc backfill --date <날짜>` 로 해당 파티션만 재적재할 수 있다(약 15분).\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-40",
+    "priority": "Medium",
+    "components": [
+      "Frontend"
+    ],
+    "created": "2026-07-31T12:00:00.000+0900",
+    "summary": "[internal-portal] 목록 화면 N+1 조회로 응답 8초",
+    "description": "h2. 사내 요청 접수\n\n*요청 팀*: 김담당 (플랫폼팀)\n*서비스*: internal-portal\n*구성요소*: Frontend\n*고장 분류*: Performance\n*심각도*: Major\n*발견일*: 2026-07-27\n\nh2. 증상 (Symptom)\n\n필터가 걸린 목록에서 행마다 상세 조회가 발생해 p95 8.2초.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nGET /items?team=... 8213ms (queries=214)\n{code}\n",
+    "labels": [
+      "Performance",
+      "internal-portal",
+      "internal-voc",
+      "resolved"
+    ],
+    "status": "완료",
+    "comments": [
+      "🔍 시니어 근본원인 분석 (작성: eng.han)\n\n*디버깅 접근*: 요청당 쿼리 수를 APM 에서 확인해 N+1 확정.\n\n*근본 원인 (Root Cause)*:\n목록 직렬화가 행마다 상세를 다시 조회한다(N+1).\n\n*적용 해결책 (Resolution)*:\n조인 한 번으로 묶고 목록 응답에 필요한 필드만 남김. p95 8.2s → 0.6s.\n\n*임시 우회책 (Workaround)*:\n필터를 좁히거나 페이지 크기를 50 이하로 두면 체감이 크게 줄어든다.\n",
+      "✅ 해결 및 검증 — 스테이징·운영에서 재현되지 않음.",
+      "🙌 고객 검증 완료 — 요청 팀 확인 완료."
+    ]
+  },
+  {
+    "key": "IVOC-41",
+    "priority": "Medium",
+    "components": [
+      "CI/CD"
+    ],
+    "created": "2026-07-13T09:00:00.000+0900",
+    "summary": "[장애] 배포하고 나서 기능이 사라졌습니다",
+    "description": "h2. 사내 요청 (VOC)\n\n*요청 팀*: 정테스트 (QA)\n*서비스*: release-bot\n*구성요소*: CI/CD\n*고장 분류*: Deploy\n*심각도*: Major\n*접수일*: 2026-07-08\n\nh2. 증상 (Symptom)\n\n어제 배포 뒤로 어떤 사람은 기능이 보이고 어떤 사람은 안 보입니다.\n\nh2. 고객 요청 (Ask)\n\n롤백해야 하나요, 기다리면 되나요? 판단 기준을 알려주세요. 다른 팀도 같은 증상인지 알려주세요.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nconfig_reload: applied=7/12 pods; flag=new_editor mismatch\n{code}\n",
+    "labels": [
+      "Deploy",
+      "release-bot",
+      "internal-voc",
+      "request"
+    ],
+    "status": "해야 할 일",
+    "comments": [
+      "📩 고객 추가 정보 (정테스트 (QA))\n\n재현은 사내망에서만 확인했습니다."
+    ]
+  },
+  {
+    "key": "IVOC-42",
+    "priority": "Low",
+    "components": [
+      "Quota"
+    ],
+    "created": "2026-07-03T12:00:00.000+0900",
+    "summary": "[요청] 저희 팀 API 호출 한도를 올려주세요",
+    "description": "h2. 사내 요청 (VOC)\n\n*요청 팀*: 이요청 (데이터팀)\n*서비스*: api-gateway\n*구성요소*: Quota\n*고장 분류*: Feature\n*심각도*: Minor\n*접수일*: 2026-06-24\n\nh2. 증상 (Symptom)\n\n배치를 돌리면 한도에 걸립니다. 저희 팀 한도만 올려주실 수 있나요?\n\nh2. 고객 요청 (Ask)\n\n한도 상향이 가능한지, 안 되면 대안이 있는지 알려주세요. 이번 주 안에 회신 부탁드립니다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\n429 Too Many Requests: quota=global remaining=0\n{code}\n",
+    "labels": [
+      "Feature",
+      "api-gateway",
+      "internal-voc",
+      "request"
+    ],
+    "status": "해야 할 일",
+    "comments": [
+      "📩 고객 추가 정보 (이요청 (데이터팀))\n\n재현은 사내망에서만 확인했습니다."
+    ]
+  },
+  {
+    "key": "IVOC-43",
+    "priority": "Medium",
+    "components": [
+      "Gateway"
+    ],
+    "created": "2026-07-25T16:00:00.000+0900",
+    "summary": "[장애] 대시보드가 안 열립니다",
+    "description": "h2. 사내 요청 (VOC)\n\n*요청 팀*: 박운영 (SRE)\n*서비스*: api-gateway\n*구성요소*: Gateway\n*고장 분류*: Outage\n*심각도*: Major\n*접수일*: 2026-07-20\n\nh2. 증상 (Symptom)\n\n오전 10시쯤부터 대시보드가 안 열립니다. 새로고침하면 가끔 되고 대부분 오류가 납니다.\n\nh2. 고객 요청 (Ask)\n\n지금 쓸 수 있는 방법이 있나요? 복구 예상 시점을 알려주세요. 이번 주 안에 회신 부탁드립니다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nupstream_error: connect ETIMEDOUT; pool exhausted (in_use=200/200)\n{code}\n",
+    "labels": [
+      "Outage",
+      "api-gateway",
+      "internal-voc",
+      "request"
+    ],
+    "status": "해야 할 일",
+    "comments": [
+      "📩 고객 추가 정보 (박운영 (SRE))\n\n재현은 사내망에서만 확인했습니다."
+    ]
+  },
+  {
+    "key": "IVOC-44",
+    "priority": "Highest",
+    "components": [
+      "Auth"
+    ],
+    "created": "2026-08-12T16:00:00.000+0900",
+    "summary": "[요청] 스테이징 접근 권한 주세요",
+    "description": "h2. 사내 요청 (VOC)\n\n*요청 팀*: 최기획 (프로덕트)\n*서비스*: internal-portal\n*구성요소*: Auth\n*고장 분류*: Access\n*심각도*: Blocker\n*접수일*: 2026-08-09\n\nh2. 증상 (Symptom)\n\n오늘 합류한 팀원이 스테이징에 못 들어갑니다. 계정은 만들어졌다고 합니다.\n\nh2. 고객 요청 (Ask)\n\n권한을 어떻게 신청하나요? 승인은 누가 하는지도 알려주세요. 다른 팀도 같은 증상인지 알려주세요.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nauthz: subject=new.member group=[] required=stg-readers -> 403\n{code}\n",
+    "labels": [
+      "Access",
+      "internal-portal",
+      "internal-voc",
+      "request"
+    ],
+    "status": "해야 할 일",
+    "comments": [
+      "📩 고객 추가 정보 (최기획 (프로덕트))\n\n재현은 사내망에서만 확인했습니다."
+    ]
+  },
+  {
+    "key": "IVOC-45",
+    "priority": "Low",
+    "components": [
+      "ETL"
+    ],
+    "created": "2026-07-07T10:00:00.000+0900",
+    "summary": "[문의] 어제 지표가 리포트에 안 보입니다",
+    "description": "h2. 사내 요청 (VOC)\n\n*요청 팀*: 정테스트 (QA)\n*서비스*: data-platform\n*구성요소*: ETL\n*고장 분류*: Data\n*심각도*: Minor\n*접수일*: 2026-07-02\n\nh2. 증상 (Symptom)\n\n월요일 리포트에 어제 수치가 비어 있습니다. 회의에 써야 합니다.\n\nh2. 고객 요청 (Ask)\n\n언제 채워지나요? 재적재를 요청하려면 어떻게 해야 하는지 알려주세요. 임시로 쓸 방법이 있으면 먼저 알려주세요.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\ndag=daily_agg partition=2026-08-29 rows=0 upstream_ready=false\n{code}\n",
+    "labels": [
+      "Data",
+      "data-platform",
+      "internal-voc",
+      "request"
+    ],
+    "status": "해야 할 일",
+    "comments": [
+      "📩 고객 추가 정보 (정테스트 (QA))\n\n재현은 사내망에서만 확인했습니다."
+    ]
+  },
+  {
+    "key": "IVOC-46",
+    "priority": "Medium",
+    "components": [
+      "Frontend"
+    ],
+    "created": "2026-06-09T10:00:00.000+0900",
+    "summary": "[문의] 목록 화면이 너무 느립니다",
+    "description": "h2. 사내 요청 (VOC)\n\n*요청 팀*: 최기획 (프로덕트)\n*서비스*: internal-portal\n*구성요소*: Frontend\n*고장 분류*: Performance\n*심각도*: Major\n*접수일*: 2026-06-08\n\nh2. 증상 (Symptom)\n\n목록을 열면 한참 걸립니다. 항목이 많은 팀은 더 심합니다.\n\nh2. 고객 요청 (Ask)\n\n개선 예정인가요? 그동안 빠르게 볼 방법이 있으면 알려주세요. 이번 주 안에 회신 부탁드립니다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nGET /items?team=... 8213ms (queries=214)\n{code}\n",
+    "labels": [
+      "Performance",
+      "internal-portal",
+      "internal-voc",
+      "request"
+    ],
+    "status": "해야 할 일",
+    "comments": [
+      "📩 고객 추가 정보 (최기획 (프로덕트))\n\n재현은 사내망에서만 확인했습니다."
+    ]
+  },
+  {
+    "key": "IVOC-47",
+    "priority": "Medium",
+    "components": [
+      "CI/CD"
+    ],
+    "created": "2026-08-09T15:00:00.000+0900",
+    "summary": "[장애] 배포하고 나서 기능이 사라졌습니다",
+    "description": "h2. 사내 요청 (VOC)\n\n*요청 팀*: 박운영 (SRE)\n*서비스*: release-bot\n*구성요소*: CI/CD\n*고장 분류*: Deploy\n*심각도*: Major\n*접수일*: 2026-08-08\n\nh2. 증상 (Symptom)\n\n어제 배포 뒤로 어떤 사람은 기능이 보이고 어떤 사람은 안 보입니다.\n\nh2. 고객 요청 (Ask)\n\n롤백해야 하나요, 기다리면 되나요? 판단 기준을 알려주세요. 이번 주 안에 회신 부탁드립니다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nconfig_reload: applied=7/12 pods; flag=new_editor mismatch\n{code}\n",
+    "labels": [
+      "Deploy",
+      "release-bot",
+      "internal-voc",
+      "request"
+    ],
+    "status": "해야 할 일",
+    "comments": [
+      "📩 고객 추가 정보 (박운영 (SRE))\n\n재현은 사내망에서만 확인했습니다."
+    ]
+  },
+  {
+    "key": "IVOC-48",
+    "priority": "Low",
+    "components": [
+      "Quota"
+    ],
+    "created": "2026-07-27T17:00:00.000+0900",
+    "summary": "[요청] 저희 팀 API 호출 한도를 올려주세요",
+    "description": "h2. 사내 요청 (VOC)\n\n*요청 팀*: 박운영 (SRE)\n*서비스*: api-gateway\n*구성요소*: Quota\n*고장 분류*: Feature\n*심각도*: Minor\n*접수일*: 2026-07-21\n\nh2. 증상 (Symptom)\n\n배치를 돌리면 한도에 걸립니다. 저희 팀 한도만 올려주실 수 있나요?\n\nh2. 고객 요청 (Ask)\n\n한도 상향이 가능한지, 안 되면 대안이 있는지 알려주세요. 임시로 쓸 방법이 있으면 먼저 알려주세요.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\n429 Too Many Requests: quota=global remaining=0\n{code}\n",
+    "labels": [
+      "Feature",
+      "api-gateway",
+      "internal-voc",
+      "request"
+    ],
+    "status": "해야 할 일",
+    "comments": [
+      "📩 고객 추가 정보 (박운영 (SRE))\n\n재현은 사내망에서만 확인했습니다."
+    ]
+  },
+  {
+    "key": "IVOC-49",
+    "priority": "Low",
+    "components": [
+      "Gateway"
+    ],
+    "created": "2026-06-23T09:00:00.000+0900",
+    "summary": "[장애] 대시보드가 안 열립니다",
+    "description": "h2. 사내 요청 (VOC)\n\n*요청 팀*: 김담당 (플랫폼팀)\n*서비스*: api-gateway\n*구성요소*: Gateway\n*고장 분류*: Outage\n*심각도*: Minor\n*접수일*: 2026-06-15\n\nh2. 증상 (Symptom)\n\n오전 10시쯤부터 대시보드가 안 열립니다. 새로고침하면 가끔 되고 대부분 오류가 납니다.\n\nh2. 고객 요청 (Ask)\n\n지금 쓸 수 있는 방법이 있나요? 복구 예상 시점을 알려주세요. 임시로 쓸 방법이 있으면 먼저 알려주세요.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nupstream_error: connect ETIMEDOUT; pool exhausted (in_use=200/200)\n{code}\n",
+    "labels": [
+      "Outage",
+      "api-gateway",
+      "internal-voc",
+      "request"
+    ],
+    "status": "해야 할 일",
+    "comments": [
+      "📩 고객 추가 정보 (김담당 (플랫폼팀))\n\n재현은 사내망에서만 확인했습니다."
+    ]
+  },
+  {
+    "key": "IVOC-50",
+    "priority": "Medium",
+    "components": [
+      "Auth"
+    ],
+    "created": "2026-07-30T17:00:00.000+0900",
+    "summary": "[요청] 스테이징 접근 권한 주세요",
+    "description": "h2. 사내 요청 (VOC)\n\n*요청 팀*: 김담당 (플랫폼팀)\n*서비스*: internal-portal\n*구성요소*: Auth\n*고장 분류*: Access\n*심각도*: Major\n*접수일*: 2026-07-25\n\nh2. 증상 (Symptom)\n\n오늘 합류한 팀원이 스테이징에 못 들어갑니다. 계정은 만들어졌다고 합니다.\n\nh2. 고객 요청 (Ask)\n\n권한을 어떻게 신청하나요? 승인은 누가 하는지도 알려주세요. 이번 주 안에 회신 부탁드립니다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nauthz: subject=new.member group=[] required=stg-readers -> 403\n{code}\n",
+    "labels": [
+      "Access",
+      "internal-portal",
+      "internal-voc",
+      "request"
+    ],
+    "status": "해야 할 일",
+    "comments": [
+      "📩 고객 추가 정보 (김담당 (플랫폼팀))\n\n재현은 사내망에서만 확인했습니다."
+    ]
+  },
+  {
+    "key": "IVOC-51",
+    "priority": "Highest",
+    "components": [
+      "ETL"
+    ],
+    "created": "2026-07-31T14:00:00.000+0900",
+    "summary": "[문의] 어제 지표가 리포트에 안 보입니다",
+    "description": "h2. 사내 요청 (VOC)\n\n*요청 팀*: 이요청 (데이터팀)\n*서비스*: data-platform\n*구성요소*: ETL\n*고장 분류*: Data\n*심각도*: Blocker\n*접수일*: 2026-07-28\n\nh2. 증상 (Symptom)\n\n월요일 리포트에 어제 수치가 비어 있습니다. 회의에 써야 합니다.\n\nh2. 고객 요청 (Ask)\n\n언제 채워지나요? 재적재를 요청하려면 어떻게 해야 하는지 알려주세요. 다른 팀도 같은 증상인지 알려주세요.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\ndag=daily_agg partition=2026-08-29 rows=0 upstream_ready=false\n{code}\n",
+    "labels": [
+      "Data",
+      "data-platform",
+      "internal-voc",
+      "request"
+    ],
+    "status": "해야 할 일",
+    "comments": [
+      "📩 고객 추가 정보 (이요청 (데이터팀))\n\n재현은 사내망에서만 확인했습니다."
+    ]
+  },
+  {
+    "key": "IVOC-52",
+    "priority": "Highest",
+    "components": [
+      "Frontend"
+    ],
+    "created": "2026-06-07T11:00:00.000+0900",
+    "summary": "[문의] 목록 화면이 너무 느립니다",
+    "description": "h2. 사내 요청 (VOC)\n\n*요청 팀*: 정테스트 (QA)\n*서비스*: internal-portal\n*구성요소*: Frontend\n*고장 분류*: Performance\n*심각도*: Blocker\n*접수일*: 2026-06-02\n\nh2. 증상 (Symptom)\n\n목록을 열면 한참 걸립니다. 항목이 많은 팀은 더 심합니다.\n\nh2. 고객 요청 (Ask)\n\n개선 예정인가요? 그동안 빠르게 볼 방법이 있으면 알려주세요. 다른 팀도 같은 증상인지 알려주세요.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nGET /items?team=... 8213ms (queries=214)\n{code}\n",
+    "labels": [
+      "Performance",
+      "internal-portal",
+      "internal-voc",
+      "request"
+    ],
+    "status": "해야 할 일",
+    "comments": [
+      "📩 고객 추가 정보 (정테스트 (QA))\n\n재현은 사내망에서만 확인했습니다."
+    ]
+  },
+  {
+    "key": "IVOC-53",
+    "priority": "High",
+    "components": [
+      "CI/CD"
+    ],
+    "created": "2026-07-22T10:00:00.000+0900",
+    "summary": "[장애] 배포하고 나서 기능이 사라졌습니다",
+    "description": "h2. 사내 요청 (VOC)\n\n*요청 팀*: 최기획 (프로덕트)\n*서비스*: release-bot\n*구성요소*: CI/CD\n*고장 분류*: Deploy\n*심각도*: Critical\n*접수일*: 2026-07-16\n\nh2. 증상 (Symptom)\n\n어제 배포 뒤로 어떤 사람은 기능이 보이고 어떤 사람은 안 보입니다.\n\nh2. 고객 요청 (Ask)\n\n롤백해야 하나요, 기다리면 되나요? 판단 기준을 알려주세요. 임시로 쓸 방법이 있으면 먼저 알려주세요.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nconfig_reload: applied=7/12 pods; flag=new_editor mismatch\n{code}\n",
+    "labels": [
+      "Deploy",
+      "release-bot",
+      "internal-voc",
+      "request"
+    ],
+    "status": "해야 할 일",
+    "comments": [
+      "📩 고객 추가 정보 (최기획 (프로덕트))\n\n재현은 사내망에서만 확인했습니다."
+    ]
+  },
+  {
+    "key": "IVOC-54",
+    "priority": "Low",
+    "components": [
+      "Quota"
+    ],
+    "created": "2026-08-11T10:00:00.000+0900",
+    "summary": "[요청] 저희 팀 API 호출 한도를 올려주세요",
+    "description": "h2. 사내 요청 (VOC)\n\n*요청 팀*: 최기획 (프로덕트)\n*서비스*: api-gateway\n*구성요소*: Quota\n*고장 분류*: Feature\n*심각도*: Minor\n*접수일*: 2026-08-03\n\nh2. 증상 (Symptom)\n\n배치를 돌리면 한도에 걸립니다. 저희 팀 한도만 올려주실 수 있나요?\n\nh2. 고객 요청 (Ask)\n\n한도 상향이 가능한지, 안 되면 대안이 있는지 알려주세요. 임시로 쓸 방법이 있으면 먼저 알려주세요.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\n429 Too Many Requests: quota=global remaining=0\n{code}\n",
+    "labels": [
+      "Feature",
+      "api-gateway",
+      "internal-voc",
+      "request"
+    ],
+    "status": "해야 할 일",
+    "comments": [
+      "📩 고객 추가 정보 (최기획 (프로덕트))\n\n재현은 사내망에서만 확인했습니다."
+    ]
+  },
+  {
+    "key": "IVOC-55",
+    "priority": "High",
+    "components": [
+      "Gateway"
+    ],
+    "created": "2026-07-31T14:00:00.000+0900",
+    "summary": "[장애] 대시보드가 안 열립니다",
+    "description": "h2. 사내 요청 (VOC)\n\n*요청 팀*: 김담당 (플랫폼팀)\n*서비스*: api-gateway\n*구성요소*: Gateway\n*고장 분류*: Outage\n*심각도*: Critical\n*접수일*: 2026-07-25\n\nh2. 증상 (Symptom)\n\n오전 10시쯤부터 대시보드가 안 열립니다. 새로고침하면 가끔 되고 대부분 오류가 납니다.\n\nh2. 고객 요청 (Ask)\n\n지금 쓸 수 있는 방법이 있나요? 복구 예상 시점을 알려주세요. 이번 주 안에 회신 부탁드립니다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nupstream_error: connect ETIMEDOUT; pool exhausted (in_use=200/200)\n{code}\n",
+    "labels": [
+      "Outage",
+      "api-gateway",
+      "internal-voc",
+      "request"
+    ],
+    "status": "해야 할 일",
+    "comments": [
+      "📩 고객 추가 정보 (김담당 (플랫폼팀))\n\n재현은 사내망에서만 확인했습니다."
+    ]
+  },
+  {
+    "key": "IVOC-56",
+    "priority": "Highest",
+    "components": [
+      "Auth"
+    ],
+    "created": "2026-07-18T17:00:00.000+0900",
+    "summary": "[요청] 스테이징 접근 권한 주세요",
+    "description": "h2. 사내 요청 (VOC)\n\n*요청 팀*: 정테스트 (QA)\n*서비스*: internal-portal\n*구성요소*: Auth\n*고장 분류*: Access\n*심각도*: Blocker\n*접수일*: 2026-07-08\n\nh2. 증상 (Symptom)\n\n오늘 합류한 팀원이 스테이징에 못 들어갑니다. 계정은 만들어졌다고 합니다.\n\nh2. 고객 요청 (Ask)\n\n권한을 어떻게 신청하나요? 승인은 누가 하는지도 알려주세요. 이번 주 안에 회신 부탁드립니다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nauthz: subject=new.member group=[] required=stg-readers -> 403\n{code}\n",
+    "labels": [
+      "Access",
+      "internal-portal",
+      "internal-voc",
+      "request"
+    ],
+    "status": "해야 할 일",
+    "comments": [
+      "📩 고객 추가 정보 (정테스트 (QA))\n\n재현은 사내망에서만 확인했습니다."
+    ]
+  },
+  {
+    "key": "IVOC-57",
+    "priority": "High",
+    "components": [
+      "ETL"
+    ],
+    "created": "2026-07-20T13:00:00.000+0900",
+    "summary": "[문의] 어제 지표가 리포트에 안 보입니다",
+    "description": "h2. 사내 요청 (VOC)\n\n*요청 팀*: 이요청 (데이터팀)\n*서비스*: data-platform\n*구성요소*: ETL\n*고장 분류*: Data\n*심각도*: Critical\n*접수일*: 2026-07-16\n\nh2. 증상 (Symptom)\n\n월요일 리포트에 어제 수치가 비어 있습니다. 회의에 써야 합니다.\n\nh2. 고객 요청 (Ask)\n\n언제 채워지나요? 재적재를 요청하려면 어떻게 해야 하는지 알려주세요. 임시로 쓸 방법이 있으면 먼저 알려주세요.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\ndag=daily_agg partition=2026-08-29 rows=0 upstream_ready=false\n{code}\n",
+    "labels": [
+      "Data",
+      "data-platform",
+      "internal-voc",
+      "request"
+    ],
+    "status": "해야 할 일",
+    "comments": [
+      "📩 고객 추가 정보 (이요청 (데이터팀))\n\n재현은 사내망에서만 확인했습니다."
+    ]
+  },
+  {
+    "key": "IVOC-58",
+    "priority": "Low",
+    "components": [
+      "Frontend"
+    ],
+    "created": "2026-06-06T14:00:00.000+0900",
+    "summary": "[문의] 목록 화면이 너무 느립니다",
+    "description": "h2. 사내 요청 (VOC)\n\n*요청 팀*: 정테스트 (QA)\n*서비스*: internal-portal\n*구성요소*: Frontend\n*고장 분류*: Performance\n*심각도*: Minor\n*접수일*: 2026-05-28\n\nh2. 증상 (Symptom)\n\n목록을 열면 한참 걸립니다. 항목이 많은 팀은 더 심합니다.\n\nh2. 고객 요청 (Ask)\n\n개선 예정인가요? 그동안 빠르게 볼 방법이 있으면 알려주세요. 다른 팀도 같은 증상인지 알려주세요.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nGET /items?team=... 8213ms (queries=214)\n{code}\n",
+    "labels": [
+      "Performance",
+      "internal-portal",
+      "internal-voc",
+      "request"
+    ],
+    "status": "해야 할 일",
+    "comments": [
+      "📩 고객 추가 정보 (정테스트 (QA))\n\n재현은 사내망에서만 확인했습니다."
+    ]
+  },
+  {
+    "key": "IVOC-59",
+    "priority": "Low",
+    "components": [
+      "CI/CD"
+    ],
+    "created": "2026-08-12T11:00:00.000+0900",
+    "summary": "[장애] 배포하고 나서 기능이 사라졌습니다",
+    "description": "h2. 사내 요청 (VOC)\n\n*요청 팀*: 정테스트 (QA)\n*서비스*: release-bot\n*구성요소*: CI/CD\n*고장 분류*: Deploy\n*심각도*: Minor\n*접수일*: 2026-08-05\n\nh2. 증상 (Symptom)\n\n어제 배포 뒤로 어떤 사람은 기능이 보이고 어떤 사람은 안 보입니다.\n\nh2. 고객 요청 (Ask)\n\n롤백해야 하나요, 기다리면 되나요? 판단 기준을 알려주세요. 이번 주 안에 회신 부탁드립니다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\nconfig_reload: applied=7/12 pods; flag=new_editor mismatch\n{code}\n",
+    "labels": [
+      "Deploy",
+      "release-bot",
+      "internal-voc",
+      "request"
+    ],
+    "status": "해야 할 일",
+    "comments": [
+      "📩 고객 추가 정보 (정테스트 (QA))\n\n재현은 사내망에서만 확인했습니다."
+    ]
+  },
+  {
+    "key": "IVOC-60",
+    "priority": "Highest",
+    "components": [
+      "Quota"
+    ],
+    "created": "2026-08-15T15:00:00.000+0900",
+    "summary": "[요청] 저희 팀 API 호출 한도를 올려주세요",
+    "description": "h2. 사내 요청 (VOC)\n\n*요청 팀*: 최기획 (프로덕트)\n*서비스*: api-gateway\n*구성요소*: Quota\n*고장 분류*: Feature\n*심각도*: Blocker\n*접수일*: 2026-08-06\n\nh2. 증상 (Symptom)\n\n배치를 돌리면 한도에 걸립니다. 저희 팀 한도만 올려주실 수 있나요?\n\nh2. 고객 요청 (Ask)\n\n한도 상향이 가능한지, 안 되면 대안이 있는지 알려주세요. 이번 주 안에 회신 부탁드립니다.\n\nh2. 로그 발췌 (Log Excerpt)\n\n{code}\n429 Too Many Requests: quota=global remaining=0\n{code}\n",
+    "labels": [
+      "Feature",
+      "api-gateway",
+      "internal-voc",
+      "request"
+    ],
+    "status": "해야 할 일",
+    "comments": [
+      "📩 고객 추가 정보 (최기획 (프로덕트))\n\n재현은 사내망에서만 확인했습니다."
+    ]
+  }
+]

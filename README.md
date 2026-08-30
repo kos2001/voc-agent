@@ -73,6 +73,83 @@ bash scripts/dev.sh        # 백엔드(:8001) + 프론트(:5173)
   264건 코퍼스(LSI+NFC) 기준 LOO·unresolved P@1 1.0, paraphrase 49문항
   P@1 .898 / P@3 .939 / 게이트 통과 .939 / 무관 질의 차단 .95 (hybrid_embed).
 
+### 대응 프로파일 — 외부 고객 / 사내 VOC
+
+같은 파이프라인으로 두 종류의 VOC 를 대응한다. `RVP_VOC_PROFILE` 로 고른다.
+
+| | `external` (기본) | `internal` |
+|---|---|---|
+| 대상 | 외부 고객사 기술지원 | **사내 SW 서비스**를 쓰는 동료·팀 |
+| 응답자 | 기술지원 담당자 | 그 서비스를 운영하는 SW 엔지니어 |
+| 요청 유형 | 고장 신고·일정·우회책·규격·교환/환불·불만 | 장애·버그·권한·데이터·기능요청·성능·사용법·일정 |
+| 문체 | 격식, 배경 설명 포함 | **간결**, 과한 사과 금지, 기술 용어 그대로 |
+
+**문체만 다른 게 아니라 정책이 정반대인 지점이 있다.** 이것이 프로파일을 둔 이유다.
+
+| 코드 | external | internal | 왜 |
+|---|---|---|---|
+| `internal_key` | **차단** | 위반 아님 | 사내에서 이슈 키는 가장 유용한 정보다 — "LSI-7 에서 추적 중입니다" |
+| `compensation_promise` | **차단** | 위반 아님 | 사내에 환불·보상이라는 개념이 없다 |
+| `date_promise` | **차단** | 경고 | 사내에서 "다음 스프린트에 배포합니다" 는 정상 업무다. 차단하면 검사를 통째로 무시하게 된다 |
+| `internal_jargon` | 경고 | 위반 아님 | 사내에서는 전문 용어가 정상이다 |
+| `plain_speech` | **차단** | 경고 | 사내에서는 개조식이 흔하다 |
+| `third_party` | **차단** | 경고 | 사내 답변의 조직명은 대개 우리 팀·요청 팀이다 |
+| `secret_leak` | **차단** | **차단** | 자격증명을 티켓에 붙여넣는 것이 가장 흔한 유출 경로다 |
+
+`secret_leak` 은 이번에 추가했다 — AWS 키·GitHub/Slack 토큰·`Bearer` 헤더·개인 키·
+평문 비밀번호·`user:pw@host` 접속 문자열. **위반 내용에 값 자체를 싣지 않는다**:
+검사 결과를 화면·로그에 남기면서 비밀을 한 번 더 복사하는 꼴이 된다.
+
+규칙을 **지우지 않고 심각도만 바꾼다**. 지우면 프로파일을 바꿨을 때 무엇이 사라졌는지
+알 수 없다. 사내에서는 `redact()` 도 키를 지우지 않는다 — 지우면 "그래서 어디서
+추적하나요" 를 되묻게 만든다.
+
+**사내 경로는 사내 입력으로 잰다.** 외부 고객 문의로 사내 프로파일을 재면 분류·골격·
+정책이 전부 엉뚱한 것을 재게 된다. `scripts/build_internal_voc_mock.py` 가 사내 요청
+6종(게이트웨이 장애·SSO 권한·ETL 지연·목록 성능·배포 설정 불일치·API 쿼터)을
+해결 사례 + 미답변 요청 양쪽으로 만든다. 키는 `IVOC-` 로 분리한다.
+
+```sh
+.venv/bin/python scripts/build_internal_voc_mock.py --count 60
+RVP_KB_EXTRA=data/voc_mock_issues.json,data/internal_voc_mock_issues.json \
+RVP_VOC_PROFILE=internal .venv/bin/python scripts/validate_reply_loop.py
+```
+
+실측(2026-08-30, 사내 목 20건 · 템플릿 경로): 정책 검출 **17/17** · 오탐 **0/8** ·
+발송 차단 잔존 **0/20** · 유형 골격 **20/20** · 요청 반영 13/20 · 미분류(`other`) **0건**.
+하네스는 프로파일이 "위반 아님" 으로 정한 코드를 **안 걸리는 것이 정답**으로 센다 —
+그대로 미검출로 세면 사내 검출률이 가짜로 떨어지고, 그 수치를 보고 규칙을 되살리는
+잘못된 조치를 하게 된다.
+
+이 검증이 결함 하나를 잡았다 — 결정적 템플릿이 내부 서술을 문장 끝에 그대로 붙여
+개조식 종결("…있다.")이 답변의 문장 끝이 되고 있었다(20건 중 11건). 인용부호 안에
+넣어 고쳤다.
+
+### 반복 문의 유형(Known-Issue) — 같은 문의에는 같은 답변
+
+이 계층은 원래 **고장모드 기사**였다. 중복 티켓을 정규 문서로 묶는 지식자산 장치로,
+불량 분석 도구로는 옳다. 그런데 VOC 대응에서 이 묶음이 갖는 뜻은 다르다 —
+**같은 문의가 반복되면 답변도 하나여야 한다.** 매번 새로 지어내면 고객사마다 다른
+말을 듣게 되고, 사람이 고쳐 놓은 표현이 다음 답변에 남지 않는다.
+
+그래서 개념은 유지하되 VOC 쪽으로 다시 붙였다.
+
+- **정본 답변(`canonical_reply`)** — 사람이 검토·발송한 글이 그 유형의 정본이 된다
+  (`/voc/reply/send` 성공 시 자동). 같은 유형의 다음 문의는 그 정본을 기준으로
+  생성한다(프롬프트에 "이미 검토·발송한 정본 답변" 절로 주입). 덮어쓴다 — 가장 최근
+  발송본이 정본이고, 옛 판본은 발송 큐의 `history` 에 남는다.
+- **이름** — 화면에서 "고장모드 기사" → **"반복 문의 유형"**. 대시보드 카드도 같다.
+- **제목에서 고객사를 뗀다** — 승격 제목이 선택 이슈의 요약 그대로여서
+  `KI-1 [ISOCELL-HP9] … (Orion Telecom / Cust` 처럼 **한 고객사 이름이 유형의
+  이름으로 박혔다**. 기사는 유형의 이름이지 한 고객의 티켓 이름이 아니다.
+
+같은 실수의 더 깊은 자리도 고쳤다 — **근거를 프롬프트에 넣을 때 다른 고객사 이름을
+지운다**(`voc_agents.scrub`). Jira 미러의 요약은
+`[DDI-OLED-T7] … (Helios Automotive / MIPI DSI v1.2 host)` 형태라, 근거로 쓰는 순간
+남의 고객사명이 모델에게 그대로 들어가고 있었다. `third_party` 정책이 출력에서 막긴
+하지만, **애초에 보여주지 않는 것이 규칙으로 막는 것보다 확실하다** — 이슈 키에 대해
+이미 같은 결론을 냈다.
+
 ### 화면은 VOC 대응 순서를 따른다
 
 이 서비스의 목적은 불량 분석이 아니라 **VOC 대응**이다. 그런데 화면은 오래도록 분석
@@ -164,7 +241,7 @@ HTTP 직접 호출)** 단일 엔진으로 생성한다. 모델·엔드포인트�
 
 | 심각도 | 코드 | 뜻 |
 |---|---|---|
-| 차단 | `internal_key` `han_char` `date_promise` `compensation_promise` `plain_speech` `third_party` `wrong_language` | 고치기 전에는 발송 불가 |
+| 차단 | `secret_leak` `internal_key` `han_char` `date_promise` `compensation_promise` `plain_speech` `third_party` `wrong_language` | 고치기 전에는 발송 불가 |
 | 경고 | `unanswered_ask` `suspect_spelling` `internal_jargon` `missing_next_step` `too_long` `unsupported_certainty` | 사람이 보고 판단 |
 
 시점 표현만으로는 걸리지 않는다 — "다음 주에 확인해 보겠습니다" 는 약속이 아니다.
@@ -255,7 +332,7 @@ HTTP 직접 호출)** 단일 엔진으로 생성한다. 모델·엔드포인트�
 .venv/bin/python scripts/validate_reply_loop.py --llm      # 실제 생성 경로
 .venv/bin/python scripts/validate_reply_loop.py --llm --judge   # + LLM 판정
 .venv/bin/python scripts/validate_reply_loop.py --judge --reuse  # 생성 결과 재사용(판정만)
-.venv/bin/python tests/test_voc_agents.py                  # 118개
+.venv/bin/python tests/test_voc_agents.py                  # 161개
 ```
 
 실측(2026-08-30, VOC 목 32건):
@@ -671,8 +748,8 @@ src/
   jira_commenter.py     Jira 댓글 조회/게시 (사람 검토 승인 후 사용)
   kb_source.py          KB 원천 단일 소스 (Jira 미러 + RVP_KB_EXTRA 보조 원천)
   draft_feedback.py     초안 거부·수정 원인 분류 축적 → 프롬프트/개선 큐 환류
-  voc_agents.py         고객 대응 에이전트 3종 (의도 분류 / 답변 생성 / 발송 정책 검사)
-                        + 답변 언어 판정(ko/en)
+  voc_agents.py         대응 에이전트 3종 (의도 분류 / 답변 생성 / 발송 정책 검사)
+                        + 프로파일(external/internal) · 언어 판정(ko/en) · 교정 가드
   hitl_queue.py         HITL 큐 공용 (상태 전이·원자적 영속화)
   rca_queue.py          RCA 승인 큐 (tmp_db/rca_pending.json)
   reply_queue.py        고객 답변 발송 큐 (tmp_db/reply_pending.json)
@@ -683,6 +760,7 @@ scripts/
   jira_webhook_register.py  Jira 웹훅 등록/목록/해제 (공개 URL 필요, 폴링이 기본)
   jira_seed.py          가짜 고장 이슈 Jira 시드 생성기 (--set lsi|nfc|nfc2)
   build_voc_mock.py     VOC 성격 목 Jira 데이터 (고객 표현 질의 + 해결 사례)
+  build_internal_voc_mock.py  사내 VOC 목 데이터 (장애·권한·데이터·성능·배포·쿼터)
   validate_draft_loop.py  초안 개선 loop 엔드투엔드 검증 (결함 주입 → 복원율)
   validate_reply_loop.py  고객 답변 검증 (정책 주입/오탐 + 전수 생성 + 영어 경로 + LLM 판정)
   lsi_failure_data.py   칩 11라인 × (LSI 24종 + NFC Forum 프로토콜 14종) 고장 시나리오

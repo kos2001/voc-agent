@@ -93,6 +93,65 @@ def test_ask_terms_stem() -> None:
           not V.unanswered_asks(["롤백하면 되는지, 아니면 앱 쪽에서 대응해야 하는지 알려주세요."], body))
 
 
+def test_internal_profile() -> None:
+    """사내 VOC 는 외부 고객 응대와 **정책이 정반대인 지점**이 있다.
+
+    문체만 다른 게 아니다. 사내에서 이슈 키는 지우면 안 되는 정보이고, 환불 확약은
+    개념 자체가 없으며, 확정 일정은 정상 업무다. 파이프라인은 하나로 두고 프로파일만
+    가른다 — 두 벌이 되면 한쪽만 갱신되고, 갈라진 규칙은 없는 규칙과 같다.
+    """
+    print("\n[사내 VOC 프로파일]")
+    check("유형 체계가 다르다",
+          "access_request" in V.intents_of("internal") and "rma_request" not in V.intents_of("internal"))
+    check("사내에 없는 유형으로 분류되지 않는다",
+          V.classify("환불해 주세요", "internal")["intent"] == "other"
+          and V.classify("환불해 주세요")["intent"] == "rma_request")
+    check("장애가 최우선", V.classify("접속이 안 됩니다. 권한도 주세요.", "internal")["intent"] == "outage")
+    check("권한 요청 분류", V.classify("스테이징 접근 권한 주세요", "internal")["intent"] == "access_request")
+
+    body = "LSI-7 에서 추적 중입니다. 다음 주까지 배포하겠습니다. 확인 후 안내드리겠습니다."
+    ext = {v["code"]: v["severity"] for v in V.check(body)["violations"]}
+    intl = {v["code"]: v["severity"] for v in V.check(body, prof="internal")["violations"]}
+    check("외부는 이슈 키를 차단", ext.get("internal_key") == "block")
+    check("사내는 이슈 키가 위반이 아니다", "internal_key" not in intl, str(intl))
+    check("외부는 확정 일정을 차단", ext.get("date_promise") == "block")
+    check("사내는 확정 일정이 경고 — 커밋먼트는 정상 업무다",
+          intl.get("date_promise") == "warn", str(intl))
+    check("사내 답변은 차단되지 않는다", V.check(body, prof="internal")["blocked"] is False)
+    check("사내에서는 이슈 키를 지우지 않는다", V.redact("LSI-7 참고", "internal") == "LSI-7 참고")
+    check("외부에서는 지운다", "LSI-7" not in V.redact("LSI-7 참고"))
+    check("차단 목록도 프로파일을 따른다",
+          "internal_key" not in V.blocking_for("internal") and "internal_key" in V.blocking_for())
+    p = V.reply_prompt({"summary": "배포 후 500"}, [], None,
+                       V.classify("배포 후 500 에러", "internal"), prof="internal")
+    check("사내 페르소나", "SW 엔지니어" in p)
+    check("이슈 키 인용을 권장한다", "적극적으로" in p, p[:200])
+    check("알 수 없는 프로파일은 기본값으로 접힌다",
+          V.profile("오타")["label"] == V.profile("external")["label"])
+
+
+def test_secret_leak() -> None:
+    """자격증명은 어느 프로파일에서도 차단한다 — 사내 채널 유출이 가장 흔한 경로다."""
+    print("\n[자격증명 유출]")
+    for label, sample in [
+        ("GitHub 토큰", "토큰은 ghp_abcdefghij1234567890abcdefgh 입니다."),
+        ("AWS 키", "AKIAIOSFODNN7EXAMPLE 로 접근하세요."),
+        ("비밀번호 평문", "password: hunter2plus 로 로그인하세요."),
+        ("Bearer 토큰", "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9abcdef"),
+        ("개인 키", "-----BEGIN RSA PRIVATE KEY-----"),
+        ("접속 문자열", "postgres://svc:pw1234@db.internal:5432/app 로 붙으세요."),
+    ]:
+        r = V.check(sample + " 안내드리겠습니다.", prof="internal")
+        check(f"{label} 차단", "secret_leak" in codes(r) and r["blocked"] is True, str(codes(r)))
+    check("외부 프로파일에서도 차단",
+          "secret_leak" in codes(V.check("ghp_abcdefghij1234567890abcdefgh 안내드리겠습니다.")))
+    check("비밀 값 자체를 위반 내용에 싣지 않는다",
+          all("ghp_" not in v["detail"] for v in
+              V.check("ghp_abcdefghij1234567890abcdefgh 안내드리겠습니다.")["violations"]))
+    check("평범한 문장은 걸리지 않는다",
+          "secret_leak" not in codes(V.check("설정 파일 경로를 확인 후 안내드리겠습니다.")))
+
+
 def test_policy_blocks() -> None:
     print("\n[정책 — 차단]")
     check("내부 이슈 키", "internal_key" in codes(V.check("LSI-42 사례와 동일합니다.")))
@@ -185,6 +244,40 @@ def test_render() -> None:
     check("고객 요청을 본문에 되짚는다", "언제 고쳐지나요" in body)
 
 
+def test_internal_render_and_mock() -> None:
+    """사내 경로는 사내 입력으로 잰다 — 외부 고객 문의로 재면 엉뚱한 것을 재게 된다."""
+    print("\n[사내 목 데이터 · 템플릿]")
+    import json as _json
+    from preprocess import parse_issue
+    path = ROOT / "data" / "internal_voc_mock_issues.json"
+    if not path.exists():
+        check("사내 목 데이터 존재", False, "scripts/build_internal_voc_mock.py 로 생성")
+        return
+    raws = _json.loads(path.read_text(encoding="utf-8"))
+    reqs = [parse_issue(r) for r in raws if r.get("status") != "완료"]
+    check("요청 건이 있다", len(reqs) >= 10, str(len(reqs)))
+    intents, no_ask = set(), 0
+    for r in reqs:
+        ctx = "\n".join([r["summary"], r["symptom"], r["customer_ask"]])
+        it = V.classify(ctx, "internal")
+        intents.add(it["intent"])
+        no_ask += (not it["asks"])
+    check("사내 유형으로 분류된다", intents <= set(V.intents_of("internal")), str(intents))
+    check("'기타' 로 흘러가지 않는다", "other" not in intents, str(intents))
+    check("모든 요청에서 요청 문장이 나온다", no_ask == 0, f"{no_ask}건 누락")
+
+    r = reqs[0]
+    it = V.classify("\n".join([r["summary"], r["symptom"], r["customer_ask"]]), "internal")
+    body = V.render_reply(r, [{"key": "IVOC-1"}],
+                          {"root_cause": "커넥션이 풀에 남았다", "workaround": "CLI 로 받을 수 있다"}, it)
+    pol = V.check(body, prof="internal")
+    check("템플릿이 사내 골격을 채운다",
+          all(f"### {sec}" in body for sec in it["sections"]), body[:160])
+    check("내부 서술의 개조식이 답변 문장 끝이 되지 않는다",
+          "plain_speech" not in codes(pol), str(codes(pol)))
+    check("사내 초안은 차단되지 않는다", pol["blocked"] is False, str(pol["violations"]))
+
+
 def test_render_without_evidence() -> None:
     print("\n[근거 없을 때]")
     intent = V.classify("전원이 갑자기 꺼집니다")
@@ -201,6 +294,31 @@ def test_rma_never_promises() -> None:
     check("유형은 교환·환불", intent["intent"] == "rma_request")
     check("확약 문구 없음", "compensation_promise" not in codes(V.check(body)), body)
     check("담당 부서 이관을 안내한다", "담당 부서" in body, body)
+
+
+def test_evidence_scrubbing_and_canonical() -> None:
+    """근거는 남의 고장 이력이다 — 프롬프트에 다른 고객사 이름을 **보여주지 않는다**.
+
+    정책이 출력에서 막긴 하지만, 애초에 안 보여주는 것이 규칙으로 막는 것보다
+    확실하다(이슈 키에 대해 이미 같은 결론을 냈다).
+    """
+    print("\n[근거 정화 · 정본 답변]")
+    m = [{"key": "LSI-100", "summary": "[DDI-OLED-T7] 색온도 불일치 (Helios Automotive / MIPI host)",
+          "root_cause": "Helios Automotive 보드에서 재현", "resolution": "y", "workaround": "z"}]
+    intent = V.classify("화면 색이 이상합니다")
+    p = V.reply_prompt({"summary": "화면 색이 이상합니다"}, m, None, intent,
+                       forbidden=("Helios Automotive",))
+    check("다른 고객사명이 프롬프트에 없다", "Helios Automotive" not in p)
+    check("치환 흔적은 남는다 — 문장이 깨지지 않도록", "다른 고객사" in p)
+    check("근거 키도 여전히 없다", "LSI-100" not in p)
+    p2 = V.reply_prompt({"summary": "화면 색이 이상합니다"}, m, None, intent,
+                        canonical="이미 발송한 정본 답변입니다.")
+    check("정본 답변이 주입된다", "이미 발송한 정본 답변입니다." in p2 and "정본 답변" in p2)
+    check("정본이 없으면 그 절은 없다", "정본 답변" not in V.reply_prompt(
+        {"summary": "x"}, m, None, intent))
+    en = V.reply_prompt({"summary": "screen colour is off"}, m, None, intent,
+                        lang="en", forbidden=("Helios Automotive",), canonical="Approved reply.")
+    check("영어 경로도 같다", "Helios Automotive" not in en and "Approved reply." in en)
 
 
 def test_prompt_hides_internal_keys() -> None:
@@ -266,6 +384,24 @@ def test_language() -> None:
     p = V.reply_prompt({"summary": "device reboots"}, MATCH, PROP, intent, lang="en")
     check("영어 프롬프트에도 약속 금지 규칙", "Never promise a completion date" in p)
     check("영어 프롬프트에도 내부 키 금지", "internal ticket keys" in p)
+
+
+def test_canonical_reply_store() -> None:
+    """같은 유형의 문의에는 같은 답변이 나가야 한다 — 발송한 글이 그 유형의 정본이 된다."""
+    print("\n[반복 문의 유형 · 정본 답변]")
+    import failure_modes as F
+    F.STORE_FILE = Path(tempfile.mkdtemp()) / "ki.json"
+    art = F.promote(title="충전 중 태그 인식 실패", members=["LSI-7", "LSI-9"])
+    check("유형 생성", art["id"] == "KI-1" and art["members"] == ["LSI-7", "LSI-9"])
+    check("정본이 없으면 빈 값", F.canonical_reply_for(["LSI-7"]) == ("", ""))
+    F.set_canonical_reply(art["id"], "안녕하세요. 확인 후 안내드리겠습니다.", from_key="VOC-3")
+    body, aid = F.canonical_reply_for(["LSI-9"])
+    check("다른 멤버로도 같은 정본을 찾는다", aid == "KI-1" and "안내드리겠습니다" in body)
+    check("유형 밖의 키는 정본이 없다", F.canonical_reply_for(["LSI-999"]) == ("", ""))
+    check("빈 본문은 정본이 되지 않는다", F.set_canonical_reply(art["id"], "  ") is None)
+    F.set_canonical_reply(art["id"], "새로 발송한 답변입니다.", from_key="VOC-8")
+    check("가장 최근 발송본이 정본 — 옛 판본은 발송 이력에 남는다",
+          F.canonical_reply_for(["LSI-7"])[0] == "새로 발송한 답변입니다.")
 
 
 def test_queues_are_separate() -> None:
@@ -474,11 +610,12 @@ def test_reply_without_evidence_still_drafts() -> None:
 
 
 def main() -> int:
-    for fn in (test_intent, test_asks, test_customer_ask_is_parsed, test_ask_terms_stem, test_policy_blocks, test_policy_does_not_overreach,
+    for fn in (test_intent, test_asks, test_customer_ask_is_parsed, test_ask_terms_stem, test_internal_profile, test_secret_leak, test_policy_blocks, test_policy_does_not_overreach,
                test_policy_warns, test_third_party, test_unanswered_ask, test_spelling_warn,
-               test_proofread_guard, test_redact, test_render, test_render_without_evidence,
-               test_rma_never_promises, test_prompt_hides_internal_keys, test_language,
-               test_queues_are_separate, test_endpoints, test_send_gate, test_followup_reply, test_deep_analysis_is_customer_reply,
+               test_proofread_guard, test_redact, test_render, test_internal_render_and_mock, test_render_without_evidence,
+               test_rma_never_promises, test_prompt_hides_internal_keys, test_evidence_scrubbing_and_canonical,
+               test_language,
+               test_canonical_reply_store, test_queues_are_separate, test_endpoints, test_send_gate, test_followup_reply, test_deep_analysis_is_customer_reply,
                test_reply_without_evidence_still_drafts):
         fn()
     print()

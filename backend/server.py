@@ -1396,7 +1396,7 @@ def _generate_explain_md(query_rec: dict, match_recs: list[dict]):
     만들고, 그쪽은 여전히 엔지니어가 읽는 글이다.
     """
     ctx = _reply_context(query_rec)
-    intent = voc_agents.classify(ctx)
+    intent = voc_agents.classify(ctx, _voc_profile())
     lang = voc_agents.detect_lang(ctx)
     guidance = ""
     try:
@@ -1411,8 +1411,14 @@ def _generate_explain_md(query_rec: dict, match_recs: list[dict]):
         proposal = {"root_cause": top.get("root_cause", ""),
                     "resolution": top.get("resolution", ""),
                     "workaround": top.get("workaround", "")}
+    # 같은 유형에 이미 발송한 정본 답변이 있으면 그걸 기준으로 쓴다 — 같은 문의에
+    # 고객사마다 다른 말이 나가면 그 자체가 사고다.
+    canonical, canon_id = failure_modes.canonical_reply_for(
+        [r.get("key") for r in match_recs])
     prompt = voc_agents.reply_prompt(query_rec, match_recs, proposal, intent,
-                                     guidance=guidance, lang=lang)
+                                     guidance=guidance, lang=lang,
+                                     forbidden=tuple(_forbidden_names(query_rec)),
+                                     canonical=canonical, prof=_voc_profile())
     acc: list[str] = []
     for delta in _llm_stream(prompt, reasoning=os.getenv("RVP_EXPLAIN_REASONING", "0") == "1"):
         acc.append(delta)
@@ -1422,16 +1428,17 @@ def _generate_explain_md(query_rec: dict, match_recs: list[dict]):
         return
     # 내부 키는 규칙이 아니라 치환으로 지운다 — 모델이 규칙을 어겨도 고객에게는 안 나간다.
     # 스트리밍 중에는 원문이 스쳐 지나가므로, 최종본은 done 이벤트로 다시 내려보낸다.
-    body = voc_agents.redact(_strip_preamble(full))
+    body = voc_agents.redact(_strip_preamble(full), _voc_profile())
     body, proof = _proofread(body)      # 오타 교정 — 내용이 바뀌면 원문을 유지한다
     forbidden = tuple(_forbidden_names(query_rec))
     policy = voc_agents.check(body, has_evidence=bool(match_recs), forbidden=forbidden,
-                              lang=lang, asks=intent["asks"])
+                              lang=lang, asks=intent["asks"], prof=_voc_profile())
     _explain_md_store(query_rec, match_recs,
                       {"markdown": body, "citations": [], "dropped": [],
                        "policy": policy, "intent": intent["intent"],
                        "intent_label": intent["label"], "asks": intent["asks"],
-                       "lang": lang, "proofread": proof})
+                       "lang": lang, "proofread": proof,
+                       "canonical_from": canon_id})
 
 
 @app.get("/recommend/explain/stream", dependencies=[Depends(require("reco.read"))])
@@ -1968,11 +1975,12 @@ def recommend(req: RecommendRequest):
     # 모르면 담당자는 증상만 읽고 답을 판단하게 된다 — 답변이 요지를 빗나가는
     # 가장 흔한 경로다. 규칙 기반이라 비용이 없다.
     try:
-        _intent = voc_agents.classify(_reply_context(query_rec))
+        _intent = voc_agents.classify(_reply_context(query_rec), _voc_profile())
         out["intent"] = _intent["intent"]
         out["intent_label"] = _intent["label"]
         out["asks"] = _intent["asks"]
         out["customer_ask"] = query_rec.get("customer_ask", "")
+        out["profile"] = _voc_profile()
     except Exception:
         pass
     # 지식 공백 관측성(P3-8): coverage 미통과 질의를 공백 신호로 기록(자기 개선 loop 입력)
@@ -2159,12 +2167,25 @@ def rca_draft(req: KeyBody):
 REPLY_MARKER = preprocess.REPLY_COMMENT_MARKER
 
 
+def _voc_profile() -> str:
+    """대응 프로파일 — external(외부 고객사) | internal(사내 VOC).
+
+    조직마다 하나로 고정된다. 요청마다 바뀌는 값이 아니므로 환경변수로 둔다.
+    잘못된 값은 voc_agents.profile() 이 기본값으로 접는다.
+    """
+    return os.getenv("RVP_VOC_PROFILE", voc_agents.DEFAULT_PROFILE)
+
+
 def _forbidden_names(rec: dict) -> list[str]:
     """이 답변에 나오면 안 되는 고유명사 — KB 에 있는 **다른 고객사** 이름.
 
     근거 사례는 남의 고장 이력이다. 사실이어도 고객에게 다른 고객사를 알려주는 순간
     비밀유지 문제가 된다. 자동으로 지우지 않는다 — 문장 뜻이 바뀌므로 사람이 고쳐야 한다.
     """
+    # 사내 VOC 에서는 이 목록을 쓰지 않는다 — 사내 답변에 등장하는 조직명은
+    # 대개 우리 팀·요청 팀 이름이고, 그걸 금지어로 잡으면 경고가 소음이 된다.
+    if _voc_profile() == "internal":
+        return []
     mine = str(rec.get("customer", "") or "").strip()
     names = {str(r.get("customer", "") or "").strip()
              for r in _reco_state()["by_key"].values()}
@@ -2195,8 +2216,11 @@ def _generate_reply(rec: dict, matches: list[dict], proposal: dict | None,
                     template=template_key(rec.get("summary", "")))
             except Exception:
                 pass
+            canonical, _ = failure_modes.canonical_reply_for([m.get("key") for m in matches])
             prompt = voc_agents.reply_prompt(rec, matches, proposal, intent,
-                                             guidance=guidance, lang=lang)
+                                             guidance=guidance, lang=lang,
+                                             forbidden=tuple(_forbidden_names(rec)),
+                                             canonical=canonical, prof=_voc_profile())
             body = "".join(_llm_stream(prompt)).strip()
             if len(body) >= 80 and voc_agents.detect_lang(body) == lang:
                 fixed, _ = _proofread(_strip_preamble(body))
@@ -2218,7 +2242,7 @@ def _reply_item(rec: dict, key: str, body: str, engine: str,
     두 곳에서 만들면 재검사 기준(근거·금지어·언어)이 갈라진다."""
     forbidden = _forbidden_names(rec)
     policy = voc_agents.check(body, has_evidence=bool(matches), forbidden=tuple(forbidden),
-                              lang=lang, asks=intent["asks"])
+                              lang=lang, asks=intent["asks"], prof=_voc_profile())
     return {
         "key": key, "summary": rec.get("summary", ""), "status": rec.get("status", ""),
         "body": body, "intent": intent["intent"], "intent_label": intent["label"],
@@ -2293,13 +2317,13 @@ def voc_reply_draft(req: ReplyDraftBody):
         # 남기지 않으면 지식 공백이 고객 응대 품질로만 새어 나가고 집계되지 않는다.
         _record_gap(rec, result, "reply_no_evidence")
     ctx = _reply_context(rec)
-    intent = voc_agents.classify(ctx)
+    intent = voc_agents.classify(ctx, _voc_profile())
     # 고객이 쓴 언어로 답한다. 내용이 정확해도 언어가 다르면 대응 실패다.
     lang = voc_agents.detect_lang(ctx)
     body, engine = ((voc_agents.render_reply(rec, matches, proposal, intent, lang=lang), "template")
                     if not req.use_llm else _generate_reply(rec, matches, proposal, intent, lang))
     # 내부 키는 규칙으로 막기 전에 지운다 — 모델이 규칙을 어겨도 고객에게는 안 나간다.
-    body = voc_agents.redact(body)
+    body = voc_agents.redact(body, _voc_profile())
     return _queue_reply(_reply_item(rec, req.key, body, engine, matches, intent, lang), prev)
 
 
@@ -2330,9 +2354,9 @@ def voc_reply_draft_from_text(req: ReplyFromTextBody):
     result = _recommend_cached(rec, k=4, exclude_key=req.key)
     matches = result.get("matches", []) if result.get("coverage") else []
     ctx = _reply_context(rec)
-    intent = voc_agents.classify(ctx)
+    intent = voc_agents.classify(ctx, _voc_profile())
     lang = voc_agents.detect_lang(ctx)
-    body = voc_agents.redact(req.body.strip())
+    body = voc_agents.redact(req.body.strip(), _voc_profile())
     item = _reply_item(rec, req.key, body, "llm", matches, intent, lang)
     item["needs_review"] = True     # 화면을 거쳤어도 생성물인 것은 같다
     return _queue_reply(item, prev)
@@ -2362,9 +2386,12 @@ def voc_reply_pending():
 @app.get("/voc/reply/intents", dependencies=[Depends(require("reply.read"))])
 def voc_reply_intents():
     """요청 유형 분류 체계 — UI 가 라벨/골격을 하드코딩하지 않도록 서버가 내려준다."""
-    return {"intents": [{"code": k, "label": v["label"], "goal": v["goal"],
-                         "sections": list(v["sections"])} for k, v in voc_agents.INTENTS.items()],
-            "blocking": list(voc_agents.BLOCKING)}
+    pf = _voc_profile()
+    return {"profile": pf, "profile_label": voc_agents.profile(pf)["label"],
+            "intents": [{"code": k, "label": v["label"], "goal": v["goal"],
+                         "sections": list(v["sections"])}
+                        for k, v in voc_agents.intents_of(pf).items()],
+            "blocking": voc_agents.blocking_for(pf)}
 
 
 class ReplyCheckBody(BaseModel):
@@ -2385,7 +2412,8 @@ def voc_reply_check(req: ReplyCheckBody):
     forbidden = tuple(item.get("forbidden") or ()) if item else ()
     lang = str(item.get("lang") or "ko") if item else "ko"
     return voc_agents.check(req.body, has_evidence=has_ev, forbidden=forbidden, lang=lang,
-                            asks=(item.get("asks") or []) if item else ())
+                            asks=(item.get("asks") or []) if item else (),
+                            prof=_voc_profile())
 
 
 class ReplySendBody(BaseModel):
@@ -2411,7 +2439,7 @@ def voc_reply_send(req: ReplySendBody, request: Request):
     policy = voc_agents.check(final, has_evidence=bool(item.get("has_evidence")),
                               forbidden=tuple(item.get("forbidden") or ()),
                               lang=str(item.get("lang") or "ko"),
-                              asks=item.get("asks") or [])
+                              asks=item.get("asks") or [], prof=_voc_profile())
     if policy["blocked"]:
         return {"ok": False, "error": "정책 위반이 남아 있어 발송하지 않았습니다.",
                 "policy": policy}
@@ -2424,8 +2452,21 @@ def voc_reply_send(req: ReplySendBody, request: Request):
             edited=(original.strip() != final.strip()), policy=policy,
             note=(req.note or "")[:1000], sender=_actor(request),
             sent_at=_dt.datetime.now().isoformat(timespec="seconds"))
+        # 사람이 검토·발송한 글은 이 유형의 **정본**이다. 같은 유형의 다음 문의는
+        # 이걸 기준으로 쓴다 — 사람이 고쳐 놓은 표현이 다음 답변에 남지 않으면
+        # 검토가 매번 처음부터 반복된다. 실패해도 발송은 유효해야 하므로 삼킨다.
+        canon = None
+        try:
+            _, aid = failure_modes.canonical_reply_for(item.get("evidence") or [])
+            aid = aid or failure_modes.member_index().get((item.get("evidence") or [""])[0], "")
+            if aid:
+                failure_modes.set_canonical_reply(aid, final, from_key=req.key,
+                                                  author=_actor(request))
+                canon = aid
+        except Exception:
+            pass
         return {"ok": True, "item": updated, "policy": policy,
-                "edited": original.strip() != final.strip(),
+                "edited": original.strip() != final.strip(), "canonical_for": canon,
                 "counts": reply_queue.counts(), "stats": _reply_stats()}
     except Exception as e:
         return {"ok": False, "error": str(e)[:200]}
