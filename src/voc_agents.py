@@ -846,8 +846,13 @@ def _sentence_hit(text: str, a: re.Pattern, b: re.Pattern) -> str:
 
 
 def check(text: str, *, has_evidence: bool = True, forbidden: tuple = (),
-          lang: str = "ko", asks=(), prof: str = "") -> dict:
+          lang: str = "ko", asks=(), prof: str = "", known_keys=()) -> dict:
     """발송 전 정책 검사. 반환: {ok, blocked, violations:[{code,severity,detail}]}
+
+    known_keys — 본문에 나와도 되는 이슈 키(근거 사례 + 이 문의 자신). 사내
+    프로파일은 이슈 키를 허용하지만, **근거에 없는 키는 여전히 환각**이다. 실측에서
+    모델이 "본 건은 SPT-1042 로 추적합니다" 처럼 없는 티켓 번호를 지어냈다 — 받는
+    사람은 그 번호를 찾으러 갔다가 없다는 것을 알기까지 시간을 쓴다.
 
     prof — 프로파일. 심각도가 여기서 갈린다: 사내 VOC 는 이슈 키가 정상이고
     (오히려 필요하다), 환불 확약은 개념 자체가 없으며, 확정 일정은 정상 업무라
@@ -869,6 +874,12 @@ def check(text: str, *, has_evidence: bool = True, forbidden: tuple = (),
     keys = sorted(issue_keys.find_set(text))
     if keys:
         add("internal_key", "block", f"내부 이슈 키 노출: {', '.join(keys[:5])}")
+    if known_keys:
+        allowed = issue_keys.expand(set(known_keys))
+        unknown = sorted(set(keys) - allowed)
+        if unknown:
+            add("unknown_key", "warn",
+                f"근거에 없는 이슈 키(지어냈을 수 있음): {', '.join(unknown[:5])}")
     han = _han_re().findall(text or "")
     if han:
         add("han_char", "block", f"한자 사용: {''.join(sorted(set(han))[:10])}")
