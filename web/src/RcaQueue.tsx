@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { inputCls } from "./ui";
+import { linkifyKeys, useJiraBase } from "./issueLinks";
 import remarkGfm from "remark-gfm";
 
 const API = (import.meta as any).env?.VITE_API ?? "";   // 빈 값 = 같은 오리진(개발은 vite 프록시)
@@ -23,6 +24,8 @@ const LEVER_STYLE: Record<string, string> = {
 };
 
 export default function RcaQueue({ onBack, onChange }: { onBack: () => void; onChange?: () => void }) {
+  // 본문의 사례 키를 Jira 원본 링크로 — 검토자가 근거를 확인하려면 원본을 열어야 한다.
+  const jiraBase = useJiraBase();
   const [items, setItems] = useState<QItem[]>([]);
   const [busy, setBusy] = useState<string>("");
   const [msg, setMsg] = useState<{ key: string; ok: boolean; text: string } | null>(null);
@@ -100,7 +103,7 @@ export default function RcaQueue({ onBack, onChange }: { onBack: () => void; onC
       <div className="max-w-3xl mx-auto p-6">
         <div className="flex items-center gap-3 mb-1">
           <button onClick={onBack} className="text-sm text-zinc-400 hover:text-sky-400">← 홈(분석 화면)</button>
-          <h1 className="text-xl font-bold text-zinc-100">📤 RCA 댓글 승인 대기 (HITL)</h1>
+          <h1 className="text-xl font-bold text-zinc-100">🧾 분석 코멘트 게시 대기</h1>
         </div>
         <p className="text-sm text-zinc-400 mb-5">사람이 승인할 때만 Jira에 게시됩니다. 거부하면 게시되지 않습니다.</p>
 
@@ -111,7 +114,7 @@ export default function RcaQueue({ onBack, onChange }: { onBack: () => void; onC
             <button onClick={load} className="ml-2 underline hover:text-red-300">다시 시도</button>
           </div>
           ) : (
-          <div className="text-center text-zinc-400 py-16 text-sm">대기 중인 초안이 없습니다. 분석 화면에서 미해결 이슈의 "RCA 초안 생성"으로 추가하세요.</div>
+          <div className="text-center text-zinc-400 py-16 text-sm">대기 중인 코멘트가 없습니다. VOC 대응 화면의 "🧾 분석 코멘트 초안"으로 추가하세요.</div>
           )
         ) : (
           <div className="space-y-4">
@@ -165,7 +168,9 @@ export default function RcaQueue({ onBack, onChange }: { onBack: () => void; onC
                         /* prose-invert 필수 — 빼면 typography 기본색(어두운 회색)이 남아
                            다크 배경에서 본문이 보이지 않는다. */
                         className="max-h-96 overflow-y-auto bg-zinc-900/60 p-3 prose prose-sm prose-invert max-w-none prose-headings:text-sky-300">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{bodyOf(it)}</ReactMarkdown>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}
+                      components={{ a: ({ node, ...p }) => <a {...p} target="_blank" rel="noreferrer" /> }}>
+                      {linkifyKeys(bodyOf(it), jiraBase)}</ReactMarkdown>
                       </div>
                     )}
                   </div>

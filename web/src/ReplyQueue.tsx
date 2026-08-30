@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { linkifyKeys, useJiraBase } from "./issueLinks";
+import { postJson } from "./api";
 
 const API = (import.meta as any).env?.VITE_API ?? "";   // 빈 값 = 같은 오리진(개발은 vite 프록시)
 
@@ -25,6 +27,8 @@ const SEV_STYLE: Record<string, string> = {
 
 export default function ReplyQueue({ onBack, onChange }:
   { onBack: () => void; onChange?: () => void }) {
+  // 사내 프로파일 답변에는 이슈 키가 그대로 남는다 — 원본으로 갈 수 있어야 한다.
+  const jiraBase = useJiraBase();
   const [items, setItems] = useState<RItem[]>([]);
   const [stats, setStats] = useState<any>(null);
   const [edits, setEdits] = useState<Record<string, string>>({});
@@ -54,10 +58,8 @@ export default function ReplyQueue({ onBack, onChange }:
   // 사람이 방금 넣은 위반을 보지 못한 채 보낸다. 편집 시 즉시 다시 검사한다.
   const recheck = async (it: RItem, text: string) => {
     try {
-      const d = await fetch(`${API}/voc/reply/check`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key: it.key, body: text, has_evidence: it.has_evidence }),
-      }).then((r) => r.json());
+      const d = await postJson(`/voc/reply/check`,
+        { key: it.key, body: text, has_evidence: it.has_evidence });
       setLive((v) => ({ ...v, [it.key]: d }));
     } catch { /* 검사 실패는 발송 버튼을 열어주지 않는다 — 이전 판정을 유지한다 */ }
   };
@@ -68,10 +70,7 @@ export default function ReplyQueue({ onBack, onChange }:
       const payload = action === "send"
         ? { key: it.key, body: isEdited(it) ? bodyOf(it) : undefined }
         : { key: it.key, reason: "" };
-      const d = await fetch(`${API}/voc/reply/${action}`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      }).then((r) => r.json());
+      const d = await postJson(`/voc/reply/${action}`, payload);
       if (d.ok) {
         setMsg({ key: it.key, ok: true, text: action === "send" ? "고객에게 발송했습니다." : "거부했습니다." });
         load(); onChange?.();
@@ -203,7 +202,9 @@ export default function ReplyQueue({ onBack, onChange }:
                     className="mt-2 w-full rounded-lg border border-zinc-700 bg-zinc-950 p-3 font-mono text-[13px] text-zinc-200 outline-none focus:border-sky-600" />
                 ) : (
                   <div className="mt-2 rounded-lg border border-zinc-700 bg-zinc-950 p-4 prose prose-sm prose-invert max-w-none">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{bodyOf(it)}</ReactMarkdown>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}
+                      components={{ a: ({ node, ...p }) => <a {...p} target="_blank" rel="noreferrer" /> }}>
+                      {linkifyKeys(bodyOf(it), jiraBase)}</ReactMarkdown>
                   </div>
                 )}
 

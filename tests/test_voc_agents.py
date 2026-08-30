@@ -556,6 +556,26 @@ def test_spelling_warn() -> None:
           V.check("안녕하세요 ㅋ 안내드리겠습니다.")["blocked"] is False)
 
 
+def test_jira_markup_conversion() -> None:
+    """게시되는 것은 마크다운이 아니라 **Jira wiki markup** 이다.
+
+    번호 목록을 그대로 두면 목록이 아니라 평문으로 렌더된다 — 답변의 '권장 조치
+    순서' 가 통째로 문단으로 뭉개진다(실제로 그렇게 나가고 있었다).
+    """
+    print("\n[Jira 게시 형식]")
+    server, _ = _client()
+    out = server._md_to_jira("### 조치\n\n1. 첫 단계 **강조**.\n2. 두 번째.\n\n- 글머리\n")
+    check("헤딩 → h3.", "h3. 조치" in out, out)
+    check("번호 목록 → #", "# 첫 단계" in out and "# 두 번째" in out, out)
+    check("글머리 → *", "* 글머리" in out, out)
+    check("굵게 표시는 평문화된다 — Jira 에서 조사가 붙으면 렌더가 깨진다",
+          "**" not in out and "강조" in out, out)
+    plain = server._md_to_jira("일반 문단 1. 문장 안의 번호는 그대로 둡니다.\n")
+    check("문장 안의 번호는 목록이 아니다", "# 문장" not in plain, plain)
+    check("이슈 키는 monospace 로 감싼다 — Jira 가 카드로 확장하지 않도록",
+          "{{LSI-7}}" in server._md_to_jira("근거 LSI-7 참고"))
+
+
 def test_deep_analysis_is_customer_reply() -> None:
     """화면의 'AI 심층 분석' 자리는 이제 **고객 응대 답변**을 낸다.
 
@@ -615,7 +635,8 @@ def main() -> int:
                test_proofread_guard, test_redact, test_render, test_internal_render_and_mock, test_render_without_evidence,
                test_rma_never_promises, test_prompt_hides_internal_keys, test_evidence_scrubbing_and_canonical,
                test_language,
-               test_canonical_reply_store, test_queues_are_separate, test_endpoints, test_send_gate, test_followup_reply, test_deep_analysis_is_customer_reply,
+               test_canonical_reply_store, test_queues_are_separate, test_endpoints, test_send_gate, test_followup_reply, test_jira_markup_conversion,
+               test_deep_analysis_is_customer_reply,
                test_reply_without_evidence_still_drafts):
         fn()
     print()

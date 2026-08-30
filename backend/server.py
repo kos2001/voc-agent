@@ -54,6 +54,8 @@ import ontology  # noqa: E402
 import ownership  # noqa: E402
 import quality_gate  # noqa: E402
 import draft_feedback  # noqa: E402
+import guides  # noqa: E402
+import issue_chat  # noqa: E402
 import issue_keys  # noqa: E402
 import kb_source  # noqa: E402
 import rca_feedback  # noqa: E402
@@ -1415,10 +1417,12 @@ def _generate_explain_md(query_rec: dict, match_recs: list[dict]):
     # 고객사마다 다른 말이 나가면 그 자체가 사고다.
     canonical, canon_id = failure_modes.canonical_reply_for(
         [r.get("key") for r in match_recs])
+    docs, doc_hits = _policy_docs_for(query_rec, intent)
     prompt = voc_agents.reply_prompt(query_rec, match_recs, proposal, intent,
                                      guidance=guidance, lang=lang,
                                      forbidden=tuple(_forbidden_names(query_rec)),
-                                     canonical=canonical, prof=_voc_profile())
+                                     canonical=canonical, prof=_voc_profile(),
+                                     policy_docs=docs)
     acc: list[str] = []
     for delta in _llm_stream(prompt, reasoning=os.getenv("RVP_EXPLAIN_REASONING", "0") == "1"):
         acc.append(delta)
@@ -1438,7 +1442,12 @@ def _generate_explain_md(query_rec: dict, match_recs: list[dict]):
                        "policy": policy, "intent": intent["intent"],
                        "intent_label": intent["label"], "asks": intent["asks"],
                        "lang": lang, "proofread": proof,
-                       "canonical_from": canon_id})
+                       "canonical_from": canon_id,
+                       # 어떤 지침을 적용했는지 남긴다 — 검토자가 "왜 이렇게 답했나" 를
+                       # 물었을 때 답할 수 있어야 한다.
+                       "policy_docs": [{"title": h.get("doc_title", ""),
+                                        "section": h.get("section", ""),
+                                        "url": h.get("url", "")} for h in doc_hits]})
 
 
 @app.get("/recommend/explain/stream", dependencies=[Depends(require("reco.read"))])
@@ -1481,6 +1490,7 @@ def explain_stream(key: Optional[str] = None, summary: str = "", symptom: str = 
                      "policy": hit.get("policy"), "intent_label": hit.get("intent_label", ""),
                      "asks": hit.get("asks", []), "lang": hit.get("lang", "ko"),
                      "proofread": hit.get("proofread"),
+                     "policy_docs": hit.get("policy_docs", []),
                      "citations": hit.get("citations", [])}, ensure_ascii=False) + "\n\n")
                 return
             # 생성은 워커가 맡고 여기서는 따라 읽기만 한다 — 연결이 끊겨도
@@ -1511,6 +1521,7 @@ def explain_stream(key: Optional[str] = None, summary: str = "", symptom: str = 
                  "policy": done_hit.get("policy"), "intent_label": done_hit.get("intent_label", ""),
                  "asks": done_hit.get("asks", []), "lang": done_hit.get("lang", "ko"),
                  "proofread": done_hit.get("proofread"),
+                 "policy_docs": done_hit.get("policy_docs", []),
                  "citations": done_hit.get("citations", [])}, ensure_ascii=False) + "\n\n")
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)[:200]}, ensure_ascii=False)}\n\n"
@@ -1528,7 +1539,7 @@ def explain_stream(key: Optional[str] = None, summary: str = "", symptom: str = 
 # 필요하면 이 값을 외부로 긁어 가면 된다.
 # ---------------------------------------------------------------------------
 _METRICS_MAX = 500
-_METRICS: dict[str, list] = {"recommend": [], "explain": []}
+_METRICS: dict[str, list] = {"recommend": [], "explain": [], "chat": []}
 _METRICS_LOCK = threading.Lock()
 
 
@@ -2059,7 +2070,12 @@ def _md_to_jira(md: str) -> str:
         if m:
             lines.append(f"h{len(m.group(1))}. {m.group(2)}")
         else:
-            lines.append(re.sub(r"^(\s*)-\s+", r"\1* ", ln))  # 글머리 - → *
+            # 글머리 - → *, 번호 목록 1. → # (Jira wiki 의 순서 목록 기호).
+            # 번호를 그대로 두면 목록이 아니라 **평문**으로 렌더된다 — 답변의 '권장
+            # 조치 순서' 가 통째로 문단으로 뭉개진다.
+            ln2 = re.sub(r"^(\s*)-\s+", r"\1* ", ln)
+            ln2 = re.sub(r"^(\s*)\d+\.\s+", r"\1# ", ln2)
+            lines.append(ln2)
     s = "\n".join(lines)
     s = re.sub(r"`([^`\n]+)`", r"{{\1}}", s)              # 인라인 코드 → Jira monospace
     # 인라인 강조 마커(**, *)는 평문화한다. Jira 볼드 *x*는 닫는 *에 한글 조사가 붙으면
@@ -2067,7 +2083,7 @@ def _md_to_jira(md: str) -> str:
     # 정상 '*'가 없으므로, 줄머리 글머리표('* ')만 남기고 그 외 '*'는 모두 제거한다.
     out = []
     for ln in s.split("\n"):
-        m = re.match(r"^(\s*\*\s)(.*)$", ln)              # 글머리표 줄
+        m = re.match(r"^(\s*[*#]\s)(.*)$", ln)           # 글머리표·번호목록 줄
         out.append((m.group(1) + m.group(2).replace("*", "")) if m else ln.replace("*", ""))
     s = "\n".join(out)
     # 이슈 키(LSI-123) monospace 래핑: 맨키워드는 Jira가 요약·상태 카드로 자동 확장돼
@@ -2156,6 +2172,224 @@ def rca_draft(req: KeyBody):
     return _queue_result(rca_queue.upsert(item))
 
 
+def _policy_docs_for(rec: dict, intent: dict) -> tuple[str, list[dict]]:
+    """이 문의에 적용할 사내 지침(Confluence·FAQ) 블록과 출처.
+
+    질의는 요약·증상·**요청 유형 라벨**을 함께 쓴다 — "환불" 이라는 단어가 문의에
+    없어도 유형이 '교환·환불' 이면 그 지침을 찾아야 한다.
+    """
+    try:
+        q = " ".join([str(rec.get("summary", "")), str(rec.get("symptom", "")),
+                      str(rec.get("customer_ask", "")), str(intent.get("label", ""))])
+        return guides.prompt_block(q, k=3)
+    except Exception as e:
+        print(f"[guides] 지침 조회 실패(지침 없이 진행): {str(e)[:120]}")
+        return "", []
+
+
+@app.get("/guides", dependencies=[Depends(require("knowledge.read"))])
+def guides_status():
+    """지침 원천 현황 — 무엇을 언제 읽어 왔는지, 실패한 원천은 무엇인지."""
+    return {**guides.stats(), "env_sources": guides.env_sources(),
+            "confluence_base": guides.confluence_base()}
+
+
+@app.get("/guides/search", dependencies=[Depends(require("knowledge.read"))])
+def guides_search(q: str, k: int = 5):
+    return {"query": q, "hits": guides.search(q, k=max(1, min(k, 20)))}
+
+
+class GuideSourcesBody(BaseModel):
+    sources: list[str] = []
+    sync: bool = True        # 저장하고 바로 수집한다 — 저장만 하면 반영됐는지 알 수 없다
+
+
+@app.post("/guides/sources", dependencies=[Depends(require("config.write"))])
+def guides_set_sources(req: GuideSourcesBody):
+    """지침 원천 목록을 화면에서 설정한다.
+
+    `.env` 를 고치고 서버를 다시 띄우는 대신 **저장값**으로 둔다(app_config) — 다른
+    설정(Jira·LLM)과 같은 경로다. 저장 즉시 환경에 주입되므로 재기동이 필요 없다.
+    """
+    clean = [x.strip() for x in (req.sources or []) if x.strip()]
+    app_config.set_env(guides.ENV_SOURCES, ",".join(clean))
+    out = {"ok": True, "sources": clean}
+    if req.sync and clean:
+        try:
+            guides.save(guides.collect())
+        except Exception as e:
+            return {**out, "ok": False, "error": f"저장은 됐지만 수집에 실패했습니다: {str(e)[:160]}"}
+    out["stats"] = guides.stats()
+    return out
+
+
+class GuideTextBody(BaseModel):
+    title: str
+    text: str
+    id: str = ""
+
+
+@app.post("/guides/manual", dependencies=[Depends(require("knowledge.write"))])
+def guides_manual_upsert(req: GuideTextBody, request: Request):
+    """지침을 **직접 작성**한다. 위키에 없는 규칙을 화면에서 바로 적는 통로다.
+
+    수집본과 저장 파일을 나눈다 — 수집본은 캐시지만 사람이 쓴 글은 원본이라,
+    같은 파일에 두면 다음 수집이 덮어쓴다.
+    """
+    try:
+        item = guides.manual_upsert(req.title, req.text, item_id=req.id, author=_actor(request))
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "item": item, "stats": guides.stats()}
+
+
+@app.get("/guides/manual", dependencies=[Depends(require("knowledge.read"))])
+def guides_manual_list():
+    return {"items": guides.manual_items()}
+
+
+@app.delete("/guides/manual/{item_id}", dependencies=[Depends(require("knowledge.write"))])
+def guides_manual_delete(item_id: str):
+    return {"ok": guides.manual_delete(item_id), "stats": guides.stats()}
+
+
+@app.post("/guides/sync", dependencies=[Depends(require("ops.sync"))])
+def guides_sync():
+    """지침 재수집. 원천 하나가 실패해도 나머지는 저장한다 — 위키 한 장이 막혔다고
+    지침 전체가 비면, 답변은 지침 없이 나가면서 그 사실을 아무도 모른다."""
+    try:
+        env = guides.save(guides.collect())
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+    st = guides.stats()
+    return {"ok": True, "stats": st,
+            "reason": (f"{st['docs']}개 문서 · {st['sections']}개 섹션 수집"
+                       + (f" · 실패 {len(st['errors'])}건" if st["errors"] else ""))}
+
+
+# ── 이슈 질의응답(챗봇) ────────────────────────────────────────────────────
+# 자연어로 묻고, KB 의 이슈 내용으로 답한다. 검색은 recommender, 생성은 _llm_stream —
+# 둘 다 이미 있는 것을 쓴다. 여기서 새로 하는 일은 근거 조립과 인용 검증이다.
+#
+# 답변 큐를 거치지 않는다: 이건 **사내 담당자가 읽는 조회 도구**이고 고객에게 나가지
+# 않는다. 그래서 이슈 키도 그대로 인용한다(고객 답변과 정반대 규칙 — 읽는 사람이 다르다).
+
+
+class ChatTurn(BaseModel):
+    role: str            # "user" | "assistant"
+    content: str
+
+
+class ChatBody(BaseModel):
+    question: str
+    history: list[ChatTurn] = []
+    key: str = ""        # 특정 이슈로 범위를 좁힐 때
+    k: int = 6
+
+
+def _chat_context(req: "ChatBody") -> tuple[list[dict], str, str]:
+    """(근거 레코드, 집계 문자열, 검색 질의). 검색이 비면 빈 목록을 그대로 돌려준다 —
+    빈 근거를 숨기면 모델이 지어내고, 사용자는 그걸 사실로 읽는다."""
+    st = _reco_state()
+    all_recs = list(st["by_key"].values())
+    facts = issue_chat.kb_facts(all_recs)
+    hist = [h.model_dump() for h in req.history]
+    q = issue_chat.retrieval_query(req.question, hist)
+    recs: list[dict] = []
+    if req.key:
+        pinned = st["by_key"].get(req.key)
+        if pinned:
+            recs.append(pinned)
+    query_rec = {"summary": q, "symptom": "", "chip": "", "category": "", "labels": []}
+    try:
+        result = st["reco"].recommend(query_rec, k=max(1, min(req.k, 12)),
+                                      exclude_key=req.key or None)
+        for m in result.get("matches", []):
+            rec = st["by_key"].get(m["key"])
+            if rec and rec not in recs:
+                recs.append(rec)
+    except Exception as e:
+        print(f"[chat] 검색 실패: {str(e)[:160]}")
+    return recs, facts, q
+
+
+@app.post("/chat", dependencies=[Depends(require("issue.read"))])
+def chat(req: ChatBody):
+    """비스트리밍 질의응답 — 스크립트·MCP 등 한 번에 받고 싶은 호출자용."""
+    if not (req.question or "").strip():
+        return {"error": "질문이 비어 있습니다."}
+    recs, facts, q = _chat_context(req)
+    docs, _ = guides.prompt_block(req.question, k=3)
+    prompt = issue_chat.build_prompt(req.question, recs, facts=facts,
+                                     history=[h.model_dump() for h in req.history],
+                                     scope_key=req.key, policy_docs=docs)
+    t0 = time.perf_counter()
+    try:
+        answer = "".join(_llm_stream(prompt)).strip()
+    except Exception as e:
+        return {"error": str(e)[:200]}
+    allowed = {r.get("key", "") for r in recs}
+    cited, bad = issue_chat.verify_citations(answer, allowed)
+    _record_metric("chat", {"total_ms": round((time.perf_counter() - t0) * 1000, 1),
+                            "chars": len(answer), "sources": len(recs)})
+    return {"answer": answer, "citations": cited, "unsupported_mentions": bad,
+            "sources": [{"key": r.get("key", ""), "summary": r.get("summary", ""),
+                         "status": r.get("status", "")} for r in recs],
+            "retrieval_query": q}
+
+
+@app.post("/chat/stream", dependencies=[Depends(require("issue.read"))])
+def chat_stream(req: ChatBody):
+    """SSE 스트리밍 질의응답.
+
+    이벤트: {type:sources,...} → {type:delta,text}* → {type:done,citations,unsupported}
+    근거를 **먼저** 보낸다 — 답이 나오기 전에 무엇을 보고 답하는지 알 수 있어야
+    사용자가 엉뚱한 근거를 즉시 알아챈다.
+    """
+    if not (req.question or "").strip():
+        def bad():
+            yield "data: " + json.dumps({"type": "error", "message": "질문이 비어 있습니다."},
+                                        ensure_ascii=False) + "\n\n"
+        return StreamingResponse(bad(), media_type="text/event-stream")
+
+    recs, facts, q = _chat_context(req)
+    docs, doc_hits = guides.prompt_block(req.question, k=3)
+    prompt = issue_chat.build_prompt(req.question, recs, facts=facts,
+                                     history=[h.model_dump() for h in req.history],
+                                     scope_key=req.key, policy_docs=docs)
+    allowed = {r.get("key", "") for r in recs}
+
+    def gen():
+        t0 = time.perf_counter()
+        yield "data: " + json.dumps(
+            {"type": "sources", "retrieval_query": q,
+             "sources": [{"key": r.get("key", ""), "summary": r.get("summary", ""),
+                          "status": r.get("status", "")} for r in recs],
+             "guides": [{"title": h.get("doc_title", ""), "section": h.get("section", ""),
+                         "url": h.get("url", "")} for h in doc_hits]},
+            ensure_ascii=False) + "\n\n"
+        acc: list[str] = []
+        try:
+            for delta in _llm_stream(prompt):
+                acc.append(delta)
+                yield "data: " + json.dumps({"type": "delta", "text": delta},
+                                            ensure_ascii=False) + "\n\n"
+        except Exception as e:
+            yield "data: " + json.dumps({"type": "error", "message": str(e)[:200]},
+                                        ensure_ascii=False) + "\n\n"
+            return
+        answer = "".join(acc)
+        cited, bad = issue_chat.verify_citations(answer, allowed)
+        _record_metric("chat", {"total_ms": round((time.perf_counter() - t0) * 1000, 1),
+                                "chars": len(answer), "sources": len(recs)})
+        yield "data: " + json.dumps({"type": "done", "citations": cited,
+                                     "unsupported_mentions": bad},
+                                    ensure_ascii=False) + "\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 # ── 고객 대응(VOC) 답변 ────────────────────────────────────────────────────
 # RCA 초안과 무엇이 다른가: 읽는 사람이 다르다. RCA 는 엔지니어가 읽는 분석이고,
 # 여기 산출물은 **고객이 그대로 받는 글**이다. 그래서 세 가지가 다르다.
@@ -2217,10 +2451,12 @@ def _generate_reply(rec: dict, matches: list[dict], proposal: dict | None,
             except Exception:
                 pass
             canonical, _ = failure_modes.canonical_reply_for([m.get("key") for m in matches])
+            docs, _hits = _policy_docs_for(rec, intent)
             prompt = voc_agents.reply_prompt(rec, matches, proposal, intent,
                                              guidance=guidance, lang=lang,
                                              forbidden=tuple(_forbidden_names(rec)),
-                                             canonical=canonical, prof=_voc_profile())
+                                             canonical=canonical, prof=_voc_profile(),
+                                             policy_docs=docs)
             body = "".join(_llm_stream(prompt)).strip()
             if len(body) >= 80 and voc_agents.detect_lang(body) == lang:
                 fixed, _ = _proofread(_strip_preamble(body))

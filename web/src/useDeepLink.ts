@@ -10,6 +10,8 @@
  *   #/dashboard       → 지식 현황
  *   #/rca             → RCA 승인 대기
  *   #/reply           → 고객 답변 발송 대기
+ *   #/chat            → 이슈 질문(챗봇)
+ *   #/guides          → 답변 지침
  *   #/voc             → VOC
  *   #/settings        → 설정
  */
@@ -21,6 +23,8 @@ export type Route =
   | { view: "dashboard" }
   | { view: "rca" }
   | { view: "reply" }
+  | { view: "chat"; key?: string }
+  | { view: "guides" }
   | { view: "voc" }
   | { view: "settings" };
 
@@ -31,6 +35,8 @@ export function parseHash(hash: string): Route {
     case "dashboard": return { view: "dashboard" };
     case "rca": return { view: "rca" };
     case "reply": return { view: "reply" };
+    case "chat": return { view: "chat", key: arg ? decodeURIComponent(arg).toUpperCase() : undefined };
+    case "guides": return { view: "guides" };
     case "voc": return { view: "voc" };
     case "settings": return { view: "settings" };
     case "issue": return { view: "app", key: arg ? decodeURIComponent(arg).toUpperCase() : undefined };
@@ -43,6 +49,8 @@ export function routeToHash(r: Route): string {
     case "dashboard": return "#/dashboard";
     case "rca": return "#/rca";
     case "reply": return "#/reply";
+    case "chat": return r.key ? `#/chat/${encodeURIComponent(r.key)}` : "#/chat";
+    case "guides": return "#/guides";
     case "voc": return "#/voc";
     case "settings": return "#/settings";
     default: return r.key ? `#/issue/${encodeURIComponent(r.key)}` : "#/";

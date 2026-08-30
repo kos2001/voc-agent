@@ -115,7 +115,7 @@ export default function Onboarding({ status, onDone, myEmail = "", authReady = f
             <span className={`text-xs px-2 py-0.5 rounded-full ${jiraReady ? "bg-emerald-950/60 text-emerald-400" : "bg-zinc-800 text-zinc-400"}`}>{jiraReady ? "준비됨" : "미설정"}</span>
           </div>
           <div className="text-[11px] text-amber-400 bg-amber-950/40 border border-amber-900/60 rounded-lg p-2.5 mb-3 leading-relaxed">
-            ⚠️ <b>전용 서비스(봇) 계정</b>을 사용하세요. RCA 댓글이 이 계정 명의로 게시됩니다.<br />
+            ⚠️ <b>전용 서비스(봇) 계정</b>을 사용하세요. 분석 코멘트가 이 계정 명의로 게시됩니다.<br />
             최소 권한만 부여: <b>해당 프로젝트 조회 + 댓글 추가(Add Comments)</b>. 개인 계정·관리자 권한은 지양하세요.
           </div>
           <div className="space-y-3">

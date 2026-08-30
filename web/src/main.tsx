@@ -5,10 +5,13 @@ import FailureAnalysis from './FailureAnalysis.tsx'
 import Onboarding from './Onboarding.tsx'
 import RcaQueue from './RcaQueue.tsx'
 import ReplyQueue from './ReplyQueue.tsx'
+import ChatPage from './ChatPage.tsx'
+import GuidesPage from './GuidesPage.tsx'
 import VocPage from './VocPage.tsx'
 import Dashboard from './Dashboard.tsx'
 import { useRoute, type Route } from './useDeepLink'
 import { AuthProvider, LoginScreen, RoleBadge, useAuth } from './auth.tsx'
+import { UNAUTHORIZED_EVENT } from './api'
 
 const API = (import.meta as any).env?.VITE_API ?? "";   // 빈 값 = 같은 오리진(개발은 vite 프록시)
 
@@ -44,6 +47,14 @@ function Shell() {
   useEffect(() => { load(); loadPending(); loadReplyPending(); }, []);
 
   const { me, cfg, loading: authLoading, can, logout, reload: reloadAuth } = useAuth();
+  // 어떤 요청이든 401 이 나면 로그인 화면으로 돌린다. 버튼마다 제각기 오류를 띄우면
+  // 사용자는 "기능이 고장났다" 로 읽는데, 실제로는 다시 로그인하면 되는 상황이다.
+  // (서버 재기동 시 RVP_SESSION_SECRET 이 고정돼 있지 않으면 이 일이 매번 생긴다.)
+  useEffect(() => {
+    const onUnauth = () => reloadAuth();
+    window.addEventListener(UNAUTHORIZED_EVENT, onUnauth);
+    return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauth);
+  }, [reloadAuth]);
   // 설정 화면·온보딩은 관리자 작업이다 — 권한이 없으면 강제하지 않는다.
   const isAdmin = can("config.write");
   const showOnboarding = status !== undefined && isAdmin
@@ -86,11 +97,13 @@ function Shell() {
           <span className="block text-[11px] text-zinc-400">고객 문의(VOC) 대응 — 답변 생성 · 검토 · 발송</span>
         </button>
         {navItem("app", "◎", "VOC 대응", "고객 문의에 보낼 답변을 만들고 검토·발송")}
+        {status?.ready && navItem("chat", "💬", "이슈 질문", "Jira 이슈 내용을 자연어로 묻고 답합니다")}
         {status?.ready && navItem("dashboard", "▤", "현황", "고객 답변 품질 + 그 답변을 떠받치는 지식 자산")}
         {status?.ready && !showOnboarding && (
           <div className="ml-auto flex items-center gap-1">
-            {can("rca.read") && navItem("rca", "↗", "RCA 승인", "엔지니어용 RCA 댓글 승인 대기 (HITL)",
+            {can("rca.read") && navItem("rca", "🧾", "분석 코멘트", "이슈에 남길 내부 분석 코멘트 — 검토 후 Jira 게시 (HITL)",
               () => { go({ view: route.view === "rca" ? "app" : "rca" }); loadPending(); }, pending)}
+            {can("knowledge.read") && navItem("guides", "📘", "지침", "답변이 따라야 할 규칙 — Confluence·FAQ·직접 작성")}
             {can("reply.read") && navItem("reply", "📮", "고객 답변", "고객에게 보낼 답변 발송 대기 (HITL)",
               () => { go({ view: route.view === "reply" ? "app" : "reply" }); loadReplyPending(); }, replyPending)}
             {can("voc.manage") && navItem("voc", "✎", "VOC", "서비스 의견 (VOC)",
@@ -126,6 +139,11 @@ function Shell() {
           <Onboarding status={status} onDone={() => load(true)} myEmail={me?.subject ?? ""} authReady={!!status?.ready} />
         ) : route.view === "rca" ? (
           <RcaQueue onBack={() => { go({ view: "app" }); loadPending(); }} onChange={loadPending} />
+        ) : route.view === "guides" ? (
+          <GuidesPage canWrite={can("knowledge.write")} />
+        ) : route.view === "chat" ? (
+          <ChatPage onOpenIssue={(key) => go({ view: "app", key })}
+            scopeKey={route.view === "chat" ? route.key : undefined} />
         ) : route.view === "reply" ? (
           <ReplyQueue onBack={() => { go({ view: "app" }); loadReplyPending(); }} onChange={loadReplyPending} />
         ) : route.view === "voc" ? (
