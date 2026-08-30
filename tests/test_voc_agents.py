@@ -617,6 +617,54 @@ def test_deep_analysis_is_customer_reply() -> None:
     check("빈 본문은 거절", empty["queued"] is False and empty["reason_code"] == "empty_body")
 
 
+def test_reply_review_axes() -> None:
+    """고객 답변 검토는 **점수가 아니라 축**이고, **게이트가 아니다.**
+
+    1~10 한 축으로 접으면 무엇이 왜 문제인지가 사라지고, "10/10 통과" 같은 문장이
+    사람에게 근거 없는 확신을 준다. 막는 것은 재현되는 규칙(정책 검사)의 일이다.
+    """
+    print("\n[고객 답변 AI 검토]")
+    tmp = Path(tempfile.mkdtemp())
+    reply_queue._Q.path = tmp / "reply.json"
+    server, c = _client()
+    _login(c, "eng@example.com")
+    c.post("/voc/reply/draft", json={"key": "VOC-1", "use_llm": False})
+
+    server._llm_stream = lambda p, reasoning=False: iter([""])   # 쓰이지 않아야 한다
+    import agno.agent as _agno
+
+    class _Out:
+        def __init__(self, t): self.content = t
+
+    class _Stub:
+        def __init__(self, text): self.text = text
+        def run(self, input=""): return _Out(self.text)
+
+    orig = _agno.Agent
+    try:
+        _agno.Agent = lambda **kw: _Stub(
+            "ANSWERS: yes\nGUIDES: n/a\nSENDABLE: no\nPROBLEM: 확정 일정을 약속했습니다.")
+        os.environ["OPENROUTER_API_KEY"] = "test-key"
+        d = c.post("/voc/reply/review", json={"key": "VOC-1"}).json()
+        rv = d["review"]
+        check("축별로 판정한다", rv["answers"] is True and rv["sendable"] is False, str(rv))
+        check("지침이 없으면 n/a 는 None", rv["guides"] is None, str(rv))
+        check("사유가 함께 온다", "확정 일정" in rv["problem"])
+        check("점수를 매기지 않는다", "score" not in rv and "passed" not in rv, str(rv.keys()))
+        check("자기 채점이면 그렇게 밝힌다", rv["self_judged"] is True, str(rv))
+        check("결정적 정책 검사를 함께 준다", "policy" in d and "violations" in d["policy"])
+
+        _agno.Agent = lambda **kw: _Stub("무슨 말인지 모르겠습니다")
+        bad = c.post("/voc/reply/review", json={"key": "VOC-1"}).json()["review"]
+        check("형식이 깨지면 판정 없음 — 통과로 세지 않는다",
+              bad["available"] is False and "형식" in bad["reason"], str(bad))
+    finally:
+        _agno.Agent = orig
+        os.environ.pop("OPENROUTER_API_KEY", None)
+
+    check("큐에 없으면 오류", "error" in c.post("/voc/reply/review", json={"key": "NOPE-1"}).json())
+
+
 def test_reply_without_evidence_still_drafts() -> None:
     print("\n[근거 없어도 답은 나간다]")
     tmp = Path(tempfile.mkdtemp())
@@ -636,7 +684,7 @@ def main() -> int:
                test_rma_never_promises, test_prompt_hides_internal_keys, test_evidence_scrubbing_and_canonical,
                test_language,
                test_canonical_reply_store, test_queues_are_separate, test_endpoints, test_send_gate, test_followup_reply, test_jira_markup_conversion,
-               test_deep_analysis_is_customer_reply,
+               test_deep_analysis_is_customer_reply, test_reply_review_axes,
                test_reply_without_evidence_still_drafts):
         fn()
     print()

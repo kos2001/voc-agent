@@ -34,6 +34,7 @@ export default function ReplyQueue({ onBack, onChange }:
   const [edits, setEdits] = useState<Record<string, string>>({});
   const [tab, setTab] = useState<Record<string, "edit" | "preview">>({});
   const [live, setLive] = useState<Record<string, Policy>>({});   // 편집 중 재검사 결과
+  const [review, setReview] = useState<Record<string, any>>({});
   const [busy, setBusy] = useState("");
   const [msg, setMsg] = useState<{ key: string; ok: boolean; text: string } | null>(null);
   const [loadErr, setLoadErr] = useState("");
@@ -62,6 +63,18 @@ export default function ReplyQueue({ onBack, onChange }:
         { key: it.key, body: text, has_evidence: it.has_evidence });
       setLive((v) => ({ ...v, [it.key]: d }));
     } catch { /* 검사 실패는 발송 버튼을 열어주지 않는다 — 이전 판정을 유지한다 */ }
+  };
+
+  // AI 검토 — 축별 판정. 점수가 아니고 게이트도 아니다(막는 것은 정책 검사의 일).
+  const runReview = async (it: RItem) => {
+    setBusy(it.key + "rev");
+    try {
+      const d = await postJson(`/voc/reply/review`, { key: it.key, body: bodyOf(it) });
+      setReview((r) => ({ ...r, [it.key]: d }));
+      if (d.policy) setLive((v) => ({ ...v, [it.key]: d.policy }));
+    } catch (e: any) {
+      setMsg({ key: it.key, ok: false, text: e.message });
+    } finally { setBusy(""); }
   };
 
   const act = async (it: RItem, action: "send" | "reject") => {
@@ -208,7 +221,44 @@ export default function ReplyQueue({ onBack, onChange }:
                   </div>
                 )}
 
+                {review[it.key]?.review && (
+                  <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-950/60 p-3">
+                    {review[it.key].review.available ? (
+                      <>
+                        <div className="flex flex-wrap gap-3 text-[12px]">
+                          {[["요청에 답함", review[it.key].review.answers],
+                            ["지침 준수", review[it.key].review.guides],
+                            ["발송 적합", review[it.key].review.sendable]].map(([label, v]) => (
+                            <span key={label as string} className={
+                              v === null || v === undefined ? "text-zinc-500"
+                                : v ? "text-emerald-400" : "text-amber-400"}>
+                              {v === null || v === undefined ? "—" : v ? "✓" : "✗"} {label as string}
+                            </span>
+                          ))}
+                        </div>
+                        {review[it.key].review.problem && review[it.key].review.problem !== "없음" && (
+                          <div className="mt-1 text-[12px] text-zinc-300">{review[it.key].review.problem}</div>
+                        )}
+                        <div className="mt-1 text-[11px] text-zinc-500">
+                          {review[it.key].review.self_judged
+                            ? "생성과 같은 모델의 판정입니다 — 참고용이며 발송을 막지 않습니다."
+                            : `판정 모델 ${review[it.key].review.model} · 참고용이며 발송을 막지 않습니다.`}
+                        </div>
+                      </>
+                    ) : (
+                      <div className="text-[12px] text-zinc-400">
+                        판정 없음: {review[it.key].review.reason} — 못 한 판정을 통과로 세지 않습니다.
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <div className="mt-3 flex items-center gap-2">
+                  <button onClick={() => runReview(it)} disabled={busy === it.key + "rev"}
+                    title="요청 응답·지침 준수·발송 적합을 AI 가 축별로 본다 (점수 아님, 게이트 아님)"
+                    className="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-300 transition hover:bg-zinc-800 disabled:opacity-40">
+                    {busy === it.key + "rev" ? "검토 중…" : "🧑‍⚖️ AI 검토"}
+                  </button>
                   <button onClick={() => act(it, "send")}
                     disabled={pol.blocked || busy === it.key + "send"}
                     title={pol.blocked ? "정책 차단이 남아 있어 발송할 수 없습니다 — 본문을 고치세요"
