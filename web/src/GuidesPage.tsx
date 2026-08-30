@@ -31,11 +31,12 @@ export default function GuidesPage({ canWrite }: { canWrite: boolean }) {
 
   const load = async () => {
     try {
+      // 응답이 비어 있어도 화면이 터지지 않게 한다 — 원인은 api.ts 가 말해 준다.
       const s = await getJson<Stats>("/guides");
-      setStats(s);
-      setSources((s.sources ?? []).join("\n"));
+      setStats(s ?? null);
+      setSources((s?.sources ?? []).join("\n"));
       const m = await getJson<{ items: Manual[] }>("/guides/manual");
-      setManual(m.items ?? []);
+      setManual(m?.items ?? []);
     } catch (e: any) { setMsg({ ok: false, text: e.message }); }
   };
   useEffect(() => { load(); }, []);
