@@ -32,6 +32,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
+import draft_defects as DD      # noqa: E402
 import draft_feedback as D      # noqa: E402
 import preprocess               # noqa: E402
 from recommender import Recommender, template_key  # noqa: E402
@@ -136,7 +137,7 @@ def run(*, write: bool, method: str, backend: str, model: str) -> int:
     recs = [preprocess.parse_issue(r) for r in json.loads(MOCK.read_text(encoding="utf-8"))]
     kb = [r for r in recs if r["status"] == "완료"]
     queries = [r for r in recs if r["status"] != "완료"]
-    print(f"[1/4] VOC 목 데이터 — KB(해결) {len(kb)}건 / 질의(미해결) {len(queries)}건")
+    print(f"[1/5] VOC 목 데이터 — KB(해결) {len(kb)}건 / 질의(미해결) {len(queries)}건")
 
     reco = Recommender(kb, method=method, embed_backend=backend, embed_model=model,
                        signals=True, rerank=False)
@@ -153,7 +154,7 @@ def run(*, write: bool, method: str, backend: str, model: str) -> int:
         if ms and out.get("coverage"):
             drafted.append((q, ms, make_draft(q, ms)))
     n = len(queries)
-    print(f"[2/4] 검색 — P@1 {p1}/{n} ({round(p1/n, 3)}) · coverage 통과 {cov}/{n} "
+    print(f"[2/5] 검색 — P@1 {p1}/{n} ({round(p1/n, 3)}) · coverage 통과 {cov}/{n} "
           f"· 초안 생성 {len(drafted)}건")
     if not drafted:
         print("  초안이 하나도 생성되지 않았습니다 — 검색/게이트를 먼저 점검하세요.")
@@ -195,7 +196,7 @@ def run(*, write: bool, method: str, backend: str, model: str) -> int:
 
     tot_inj = sum(injected_n.values())
     tot_rec = sum(recovered.values())
-    print(f"[3/4] 자동 분류 복원율 — {tot_rec}/{tot_inj} "
+    print(f"[2/5-b] 자동 분류(사후) 복원율 — {tot_rec}/{tot_inj} "
           f"({round(tot_rec / tot_inj, 3) if tot_inj else '—'})")
     for cause, k in injected_n.most_common():
         print(f"    {cause:20s} {recovered[cause]}/{k}")
@@ -204,9 +205,46 @@ def run(*, write: bool, method: str, backend: str, model: str) -> int:
     if misses:
         print(f"    복원 실패: {misses}")
 
+    # ---- ②-b 사전 탐지: 사람이 읽기 전에 잡히는가 ------------------------ #
+    # 위(②)는 **사람이 고친 뒤** 원인을 되찾는 능력을 쟀다. 여기서는 같은 결함을
+    # **고쳐지기 전에** 잡을 수 있는지 본다. 잡히면 검토 한 번을 통째로 아낀다.
+    # 재현율보다 오탐이 중요하다 — 정상 초안에서 뜨는 순간 아무도 안 본다.
+    det_hit: Counter = Counter()
+    det_n: Counter = Counter()
+    fp_on_fixed: Counter = Counter()
+    baseline_fp: Counter = Counter()
+    for i, (q, ms, draft) in enumerate(drafted):
+        ev_keys = [m["key"] for m in ms]
+        for c in DD.detect(draft, evidence_keys=ev_keys):
+            baseline_fp[c["cause"]] += 1
+        for gt, injector in INJECTORS:
+            broken, fixed = injector(draft, q, ms)
+            if broken == fixed:
+                continue
+            det_n[gt] += 1
+            found = {c["cause"] for c in DD.detect(broken, evidence_keys=ev_keys)}
+            if gt in found:
+                det_hit[gt] += 1
+            # 사람이 고친 뒤에도 그 원인이 남아 있으면 오탐이다.
+            if gt in {c["cause"] for c in DD.detect(fixed, evidence_keys=ev_keys)}:
+                fp_on_fixed[gt] += 1
+    tot_n, tot_hit = sum(det_n.values()), sum(det_hit.values())
+    print(f"[3/5] 사전 탐지(사람 검토 전) — 재현율 {tot_hit}/{tot_n} "
+          f"({round(tot_hit / tot_n, 3) if tot_n else '—'})")
+    for gt, k in det_n.most_common():
+        mark = "" if det_hit[gt] == k else "   ← 탐지 불가(사람 판단 필요)"
+        print(f"    {gt:20s} {det_hit[gt]}/{k}{mark}")
+    print(f"    사람이 고친 뒤에도 남은 지적(오탐): {dict(fp_on_fixed) or '없음'}")
+    # 주입 전 초안에서 뜨는 지적은 **오탐이 아니다**. 이 하네스의 초안 형식은
+    # 사례의 resolution 한 줄을 그대로 옮기므로 번호 절차가 애초에 없다(실제
+    # 서버 프롬프트는 "번호가 있는 구체적 순서" 를 요구한다). 즉 탐지기가 옳고,
+    # 하네스 초안이 그 기준에 미달인 것이다 — 여기서 0 이 나오길 기대하면 안 된다.
+    print(f"    주입 전 초안에서 뜬 지적: {dict(baseline_fp) or '없음'}"
+          f"  (하네스 초안 형식상 번호 절차 없음 → 참탐지)")
+
     # ---- ③ 환류: 통계 → 가이던스 → 제안 ---------------------------------- #
     st = D.stats()
-    print(f"[4/4] 축적·환류")
+    print(f"[4/5] 축적·환류")
     print(f"    판정 {st['judged']}건 — 거부 {st['rejected']} / 수정 {st['edited']} / "
           f"무수정 {st['accepted_clean']}")
     print(f"    무수정 승인율(clean_rate) {st['clean_rate']} · 게시율(accept_rate) {st['accept_rate']}")
@@ -232,6 +270,22 @@ def run(*, write: bool, method: str, backend: str, model: str) -> int:
     print(f"    개선 제안 {len(sug)}건 — 유형 {dict(Counter(s['type'] for s in sug))}")
     for s in sug[:3]:
         print(f"      [{s['priority']}] {s['type']}: {s['rationale'][:88]}…")
+
+    # ---- ④ 검증: 주입한 개입이 효과가 있었나 ----------------------------- #
+    # loop 의 마지막 고리다. 개입(프롬프트 규칙)을 넣고도 효과를 재지 않으면
+    # 효과 없는 규칙이 영원히 남는다. 단순 전후 비교는 평균회귀 때문에 무엇이든
+    # "개선" 으로 보이므로, 같은 클래스의 다른 원인을 대조군으로 둔 이중차분을 쓴다.
+    eff = D.guidance_effect()
+    decided = [r for r in eff if r["verdict"] != "표본 부족"]
+    print(f"[5/5] 개입 효과 검증 — 활성 가이던스 {len(eff)}건 / 판정 가능 {len(decided)}건")
+    for r in eff[:4]:
+        print(f"    {r['template'][:20]:22s} {r['cause']:18s} "
+              f"{r['rate_before']}→{r['rate_after']} (보정 {r['adjusted_delta']:+}) {r['verdict']}"
+              f"  [활성 후 {r['n_after']}건]")
+    if not decided:
+        print("    판정 없음 — 목 데이터는 클래스당 4건뿐이라 활성 이후 표본이 "
+              "임계(EFFECT_MIN_AFTER)에 못 미친다. **표본 부족을 '효과 있음' 으로 "
+              "읽지 않는 것**이 이 단계의 요점이다(단위 테스트에서 판정 로직 검증).")
 
     if write:
         import improve_queue

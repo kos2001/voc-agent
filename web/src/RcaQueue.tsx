@@ -10,6 +10,11 @@ type QItem = {
   key: string; summary: string; status: string; body: string;
   confidence: number | null; based_on_verified: boolean; needs_review: boolean;
   based_on: string; created_at: string; state: string; comment_id?: string; source?: string;
+  // 사전 탐지된 결함 — 사람이 본문을 읽기 전에 "어디부터 보라"를 알려준다.
+  // 원인 코드는 아래 라벨링 UI 와 **같은 어휘**(draft_feedback.CAUSES)다.
+  defects?: { count: number; blocking: number; causes: string[]; levers: string[];
+              findings: { cause: string; label: string; lever: string;
+                          certainty: string; detail: string }[] };
 };
 
 type Cause = { code: string; label: string; lever: string; hint: string };
@@ -134,6 +139,36 @@ export default function RcaQueue({ onBack, onChange }: { onBack: () => void; onC
                   )}
                 </div>
                 <div className="text-sm font-medium leading-snug mb-2">{it.summary}</div>
+                {/* 사전 탐지 결함. 게시를 막지 않는다 — 확실한 것(certain)과 추정
+                    (likely)을 구분해 보여주고, 막을지는 사람이 정한다. 추정으로
+                    막으면 막힌 이유를 설명할 수 없고, 그런 게이트는 곧 꺼진다. */}
+                {it.defects && it.defects.count > 0 && (
+                  <div className="mb-3 rounded-lg border border-zinc-800 bg-zinc-950/60 p-3">
+                    <div className="text-[11px] text-zinc-400 mb-1.5">
+                      검토 전 자동 점검 — {it.defects.count}건
+                      {it.defects.blocking > 0 && (
+                        <span className="text-rose-400"> (확실 {it.defects.blocking}건)</span>
+                      )}
+                    </div>
+                    <ul className="space-y-1">
+                      {it.defects.findings.map((f, i) => (
+                        <li key={i} className="text-[12px] flex items-start gap-2">
+                          <span className={`shrink-0 mt-[1px] text-[10px] px-1.5 py-0.5 rounded border ${
+                            f.certainty === "certain"
+                              ? "border-rose-800 text-rose-300"
+                              : "border-zinc-700 text-zinc-400"}`}>
+                            {f.certainty === "certain" ? "확실" : "추정"}
+                          </span>
+                          <span className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded border ${
+                            LEVER_STYLE[f.lever] ?? "border-zinc-700 text-zinc-400"}`}>
+                            {f.label}
+                          </span>
+                          <span className="text-zinc-300 leading-snug">{f.detail}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
                 <div className="flex items-center gap-2 mb-1">
                   <button onClick={() => {
                     const open = editing === it.key;

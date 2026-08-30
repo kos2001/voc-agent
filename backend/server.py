@@ -53,6 +53,7 @@ import negative_knowledge  # noqa: E402
 import ontology  # noqa: E402
 import ownership  # noqa: E402
 import quality_gate  # noqa: E402
+import draft_defects  # noqa: E402
 import draft_feedback  # noqa: E402
 import guides  # noqa: E402
 import issue_chat  # noqa: E402
@@ -2169,9 +2170,22 @@ def rca_draft(req: KeyBody):
     p = result["proposal"] or {}
     conf = p.get("confidence", 0)
     verified = bool(p.get("based_on_verified"))
+    body = _rca_comment_body(rec, result)
+    # 초안이 사람에게 가기 **전에** 확인 가능한 결함을 잡는다. 여기서 잡히는 것들은
+    # 사후 분류(draft_feedback)가 검토 한 번을 낭비한 뒤에야 알던 것들이다.
+    # 막지는 않는다 — 검토자에게 어디를 먼저 보라고 알려줄 뿐이다(차단은 사람의 몫).
+    try:
+        defects = draft_defects.detect(
+            body, evidence_keys=[m.get("key") for m in result["matches"]], query=rec,
+            # 제안 기반 초안 — 짧은 요약이 약속의 전부다. LLM 분석 기준을 들이대면
+            # 멀쩡한 초안 전부가 결함으로 잡힌다(실측으로 확인).
+            kind="proposal")
+    except Exception:
+        defects = []
     item = {
         "key": req.key, "summary": rec.get("summary", ""), "status": rec.get("status", ""),
-        "body": _rca_comment_body(rec, result),
+        "body": body,
+        "defects": draft_defects.summary(defects),
         "confidence": conf, "based_on_verified": verified,
         # 신뢰도 낮거나 미검증 근거면 반드시 사람 검토(조건부 HITL)
         "needs_review": (conf < 0.8) or (not verified),
@@ -3513,6 +3527,18 @@ def rca_validate(req: ValidateBody):
         "citations_ok": not invalid, "invalid_citations": invalid,
         "lang_ok": bool(vr.ok), "non_empty": True,
     }
+    # 같은 결함을 **원인 코드로** 함께 낸다. 위 두 줄(citations_ok/lang_ok)은 사람이
+    # 읽는 참/거짓이고, 이건 사후 집계(draft_feedback.CAUSES)와 같은 어휘라 검토
+    # 화면에서 본 지적이 그대로 통계·개선 큐로 이어진다.
+    try:
+        # 초안 종류에 맞는 형식 계약으로 본다 — 큐 항목의 source 가 정본이고,
+        # 알 수 없으면(직접 붙여넣은 본문) 엄격한 쪽(analysis)으로 본다.
+        src = (rca_queue.get(req.key) or {}).get("source") or draft_defects.DEFAULT_KIND
+        out["defects"] = draft_defects.summary(
+            draft_defects.detect(body, evidence_keys=sorted(cited & valid),
+                                 query=st["by_key"].get(req.key), kind=src))
+    except Exception:
+        pass
     # LLM 판정 — 구조화 출력(검증된 use_json_mode 경로)으로 근거 충실도·실행가능성 채점
     rec = st["by_key"].get(req.key, {})
     cited_recs = [st["by_key"][k] for k in cited if k in st["by_key"]]
