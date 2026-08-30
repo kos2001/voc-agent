@@ -185,8 +185,15 @@ export default function RcaQueue({ onBack, onChange }: { onBack: () => void; onC
                     </div>
                     {valid[it.key].judge_score != null && (
                       <div className={valid[it.key].judge_passed ? "text-emerald-400" : "text-amber-400"}>
-                        🧑‍⚖️ 품질 점수 {valid[it.key].judge_score}/10 {valid[it.key].judge_passed ? "(통과)" : "(검토 권장)"}
-                        {valid[it.key].judge_reasoning ? ` — ${valid[it.key].judge_reasoning}` : ""}
+                        {/* "10/10 통과" 는 사람에게 근거 없는 확신을 준다. 이건 게이트가
+                            아니라 **같은 모델의 의견**이다 — 그 사실을 붙여서 보여준다. */}
+                        🧑‍⚖️ AI 참고 점수 {valid[it.key].judge_score}/10
+                        {valid[it.key].judge_passed ? "" : " — 검토 권장"}
+                        {valid[it.key].judge_reasoning ? ` · ${valid[it.key].judge_reasoning}` : ""}
+                        <div className="text-[11px] text-zinc-500">
+                          생성과 같은 모델이 매긴 값입니다. 게시를 막지 않으며, 근거·인용
+                          검증(위 항목)이 실제 판정입니다.
+                        </div>
                       </div>
                     )}
                     {valid[it.key].judge_error && <div className="text-zinc-400">판정 생략: {valid[it.key].judge_error}</div>}

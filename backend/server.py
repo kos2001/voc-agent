@@ -2614,6 +2614,106 @@ def voc_reply_status(key: str):
             "history": len(it.get("history") or [])}
 
 
+# ── 고객 답변 AI 검토 ──────────────────────────────────────────────────────
+# RCA 채점(/rca/validate)과 무엇이 다른가:
+#
+#   · 대상이 다르다 — 저건 엔지니어용 분석을 재고, 이건 **고객에게 나갈 글**을 본다.
+#   · 축이 다르다 — 실행가능성·인용정합은 엔지니어 문서의 기준이다. 고객 답변에서
+#     중요한 것은 "요청에 답했는가 / 지침을 지켰는가 / 이대로 보내도 되는가" 다.
+#   · **점수를 매기지 않는다.** 1~10 한 축으로 접으면 무엇이 왜 문제인지가 사라지고,
+#     "10/10 통과" 같은 문장이 사람에게 근거 없는 확신을 준다. 축별로 예/아니오와
+#     이유만 낸다.
+#   · **게이트가 아니다.** 막는 것은 결정적 정책 검사(voc_agents.check)의 일이다.
+#     같은 모델이 자기 글을 채점하는 값으로 발송을 막으면, 막는 근거가 재현되지 않는다.
+_REVIEW_RE = re.compile(r"^\s*(ANSWERS|GUIDES|SENDABLE)\s*:\s*(yes|no|n/?a)", re.I | re.M)
+_REVIEW_WHY_RE = re.compile(r"^\s*PROBLEM\s*:\s*(.*)$", re.I | re.M)
+
+_REVIEW_PROMPT = (
+    "아래는 고객(또는 사내 요청자)이 보낸 요청과, 그에게 보낼 답변 초안입니다. "
+    "그리고 이 답변이 따라야 할 사내 지침이 있으면 함께 제시됩니다.\n\n"
+    "세 가지만 판정하세요.\n"
+    "1) ANSWERS — 요청한 것에 실제로 답했는가? 지금 확답할 수 없다는 사실을 분명히 "
+    "밝히고 언제 답하겠다고 했다면 답한 것으로 봅니다. 질문을 그냥 건너뛴 경우만 no.\n"
+    "2) GUIDES — 제시된 지침을 지켰는가? 지침이 없으면 n/a.\n"
+    "3) SENDABLE — 이대로 보내도 되는가? (내부 정보 노출·확정 약속·보상 확약·반말 등)\n\n"
+    "정확히 아래 네 줄로만 답하세요. 다른 말은 쓰지 마세요.\n"
+    "ANSWERS: yes 또는 no\nGUIDES: yes 또는 no 또는 n/a\nSENDABLE: yes 또는 no\n"
+    "PROBLEM: 문제가 있으면 한 문장, 없으면 없음\n\n"
+    "## 요청\n{ask}\n\n## 적용된 지침\n{guides}\n\n## 답변 초안\n{body}")
+
+
+def _review_reply(ask: str, body: str, guides_block: str) -> dict:
+    """축별 판정. 실패하면 판정을 내지 않는다 — 못 한 판정을 통과로 세면 안 된다."""
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        return {"available": False, "reason": "LLM 미설정"}
+    gen_model = os.getenv("RVP_MODEL") or os.getenv("OPENROUTER_MODEL", "")
+    model = os.getenv("RVP_JUDGE_MODEL") or gen_model
+    try:
+        from agno.agent import Agent
+        from agno.models.openrouter import OpenRouter
+        agent = Agent(model=OpenRouter(id=model, api_key=os.environ["OPENROUTER_API_KEY"],
+                                       base_url=os.getenv("OPENROUTER_BASE_URL",
+                                                          "https://openrouter.ai/api/v1"),
+                                       default_headers=custom_headers() or None),
+                      markdown=False, telemetry=False)
+        text = getattr(agent.run(input=_REVIEW_PROMPT.format(
+            ask=ask or "(명시적 요청 없음)", guides=guides_block or "(제시된 지침 없음)",
+            body=body)), "content", "") or ""
+    except Exception as e:
+        return {"available": False, "reason": str(e)[:160]}
+    got = {k.upper(): v.lower() for k, v in _REVIEW_RE.findall(text)}
+    if "ANSWERS" not in got or "SENDABLE" not in got:
+        # 형식이 깨졌으면 판정 없음이다. 억지로 읽어 내면 그 값이 무엇을 뜻하는지
+        # 아무도 모른다 — 하네스에서 30건 중 5건이 이렇게 깨졌다.
+        return {"available": False, "reason": "판정 형식이 아님"}
+    m = _REVIEW_WHY_RE.search(text)
+    return {
+        "available": True, "model": model,
+        # 생성과 채점이 같은 모델이면 그건 **자기 채점**이다. 화면이 그 사실을 말해야
+        # 사람이 이 값을 적절히 의심한다.
+        "self_judged": (model == gen_model),
+        "answers": got["ANSWERS"] == "yes",
+        "guides": None if got.get("GUIDES", "n/a").startswith("n") else got["GUIDES"] == "yes",
+        "sendable": got["SENDABLE"] == "yes",
+        "problem": (m.group(1).strip() if m else "")[:300],
+    }
+
+
+class ReplyReviewBody(BaseModel):
+    key: str
+    body: Optional[str] = None    # 사람이 고친 본문(있으면 그것을 본다)
+
+
+@app.post("/voc/reply/review", dependencies=[Depends(require("reply.draft"))])
+def voc_reply_review(req: ReplyReviewBody):
+    """고객 답변 AI 검토 — 요청 응답 / 지침 준수 / 발송 적합. **점수도 게이트도 아니다.**
+
+    결정적 정책 검사(policy)를 함께 돌려준다. 둘의 성격이 다르다는 것을 화면이
+    보여줘야 한다 — 정책은 재현되는 규칙이고, 이 판정은 모델의 의견이다.
+    """
+    item = reply_queue.get(req.key)
+    if not item:
+        return {"error": "발송 대기 큐에 없습니다."}
+    body = (req.body if (req.body and req.body.strip()) else item.get("body", "")).strip()
+    if not body:
+        return {"error": "검토할 본문이 없습니다."}
+    st = _reco_state()
+    rec = st["by_key"].get(req.key, {})
+    guide_block = ""
+    try:
+        intent = {"label": item.get("intent_label", "")}
+        guide_block, _ = _policy_docs_for(rec, intent)
+    except Exception:
+        pass
+    policy = voc_agents.check(body, has_evidence=bool(item.get("has_evidence")),
+                              forbidden=tuple(item.get("forbidden") or ()),
+                              lang=str(item.get("lang") or "ko"),
+                              asks=item.get("asks") or [], prof=_voc_profile())
+    ask = "\n".join(item.get("asks") or []) or str(rec.get("customer_ask", ""))
+    return {"policy": policy, "review": _review_reply(ask, body, guide_block),
+            "asks": item.get("asks") or []}
+
+
 @app.get("/voc/reply/pending", dependencies=[Depends(require("reply.read"))])
 def voc_reply_pending():
     return {"items": reply_queue.items("pending"), "counts": reply_queue.counts()}
