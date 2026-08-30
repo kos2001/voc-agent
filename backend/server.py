@@ -58,6 +58,9 @@ import issue_keys  # noqa: E402
 import kb_source  # noqa: E402
 import rca_feedback  # noqa: E402
 import rca_queue  # noqa: E402
+import reply_queue  # noqa: E402
+import voc_agents  # noqa: E402
+import preprocess  # noqa: E402
 import reco_feedback  # noqa: E402
 import self_improve  # noqa: E402
 
@@ -1354,32 +1357,81 @@ def _explain_job(query_rec: dict, match_recs: list[dict], ckey: str) -> _Explain
     return job
 
 
-def _generate_explain_md(query_rec: dict, match_recs: list[dict]):
-    """심층 분석을 생성하며 토큰을 흘려보낸다(제너레이터). 완료 시 캐시에 저장.
+def _proofread(body: str) -> tuple[str, dict]:
+    """오타·띄어쓰기 교정. 반환 (본문, 기록).
 
-    반환 제너레이터는 문자열 조각을 yield 하고, 끝나면 캐시에 완성본을 넣는다.
+    교정본이 내용을 바꿨으면 **버리고 원문을 쓴다**(voc_agents.safe_replace).
+    교정은 있으면 좋은 것이고, 내용 보존은 양보할 수 없는 것이다. 실패해도 원문이
+    남으므로 이 단계는 답변 생성을 절대 막지 않는다.
+
+    RVP_PROOFREAD=0 으로 끈다(비용·지연이 LLM 호출 1회만큼 늘어난다).
     """
-    prompt = _explain_prompt_md(query_rec, match_recs)
-    reasoning = os.getenv("RVP_EXPLAIN_REASONING", "0") == "1"
-    valid = {r.get("key") for r in match_recs}
+    if os.getenv("RVP_PROOFREAD", "1") != "1" or not os.environ.get("OPENROUTER_API_KEY"):
+        return body, {"ran": False}
+    t0 = time.perf_counter()
+    try:
+        out = "".join(_llm_stream(voc_agents.PROOFREAD_PROMPT.format(text=body))).strip()
+        final, reason = voc_agents.safe_replace(body, _strip_preamble(out))
+        rec = {"ran": True, "applied": not reason and final != body,
+               "ms": round((time.perf_counter() - t0) * 1000, 1)}
+        if reason:
+            rec["rejected"] = reason
+            print(f"[proofread] 교정 폐기 — {reason}")
+        return final, rec
+    except Exception as e:
+        print(f"[proofread] 실패(원문 유지): {str(e)[:120]}")
+        return body, {"ran": True, "applied": False, "error": str(e)[:120]}
+
+
+def _generate_explain_md(query_rec: dict, match_recs: list[dict]):
+    """**고객에게 보낼 답변**을 생성하며 토큰을 흘려보낸다(제너레이터). 완료 시 캐시 저장.
+
+    예전에는 여기서 엔지니어용 RCA 분석(근본원인·검증 절차·사례 키 인용)을 만들었다.
+    그런데 이 서비스의 최종 산출물은 **고객이 받는 글**이다. 화면의 '심층 분석' 이
+    엔지니어 문서면, 사람이 그걸 읽고 고객 답변을 다시 쓰는 단계가 통째로 남는다 —
+    에이전트가 하라고 만든 일을 사람이 하게 된다. 그래서 생성기 자체를 고객 응대
+    답변으로 바꾼다. 캐시·예열·SSE 경로는 그대로 재사용한다.
+
+    RCA 분석 경로가 사라지는 것은 아니다 — `/rca/draft` 가 근거 기반 RCA 댓글을
+    만들고, 그쪽은 여전히 엔지니어가 읽는 글이다.
+    """
+    ctx = _reply_context(query_rec)
+    intent = voc_agents.classify(ctx)
+    lang = voc_agents.detect_lang(ctx)
+    guidance = ""
+    try:
+        guidance = draft_feedback.prompt_guidance(
+            category=query_rec.get("category", ""),
+            template=template_key(query_rec.get("summary", "")))
+    except Exception:
+        pass
+    proposal = None
+    if match_recs:
+        top = match_recs[0]
+        proposal = {"root_cause": top.get("root_cause", ""),
+                    "resolution": top.get("resolution", ""),
+                    "workaround": top.get("workaround", "")}
+    prompt = voc_agents.reply_prompt(query_rec, match_recs, proposal, intent,
+                                     guidance=guidance, lang=lang)
     acc: list[str] = []
-    for delta in _llm_stream(prompt, reasoning=reasoning):
+    for delta in _llm_stream(prompt, reasoning=os.getenv("RVP_EXPLAIN_REASONING", "0") == "1"):
         acc.append(delta)
         yield delta
     full = "".join(acc)
-    if full.strip():
-        mentioned = issue_keys.find_set(full)
-        # 허용 집합: 근거 키 + 접미사를 뗀 형태(LSI-7-rca → LSI-7) + 질의 이슈 자신.
-        # 본문은 자연스럽게 "LSI-7" 로 쓰는데 근거 키는 "LSI-7-rca" 라, 이걸 구분하지
-        # 않으면 정상 인용이 환각으로 잡힌다(측정에서 확인).
-        allowed = issue_keys.expand(list(valid) + [query_rec.get("key", "")])
-        cited = sorted(mentioned & allowed)
-        dropped = sorted(mentioned - allowed)   # 제공되지 않은 사례를 본문이 언급
-        if dropped:
-            print(f"[explain] {query_rec.get('key','?')} 본문이 미제공 사례를 언급: {dropped}")
-        _explain_md_store(query_rec, match_recs,
-                          {"markdown": mark_unsupported(full, dropped),
-                           "citations": cited, "dropped": dropped})
+    if not full.strip():
+        return
+    # 내부 키는 규칙이 아니라 치환으로 지운다 — 모델이 규칙을 어겨도 고객에게는 안 나간다.
+    # 스트리밍 중에는 원문이 스쳐 지나가므로, 최종본은 done 이벤트로 다시 내려보낸다.
+    body = voc_agents.redact(_strip_preamble(full))
+    body, proof = _proofread(body)      # 오타 교정 — 내용이 바뀌면 원문을 유지한다
+    forbidden = tuple(_forbidden_names(query_rec))
+    policy = voc_agents.check(body, has_evidence=bool(match_recs), forbidden=forbidden,
+                              lang=lang, asks=intent["asks"])
+    _explain_md_store(query_rec, match_recs,
+                      {"markdown": body, "citations": [], "dropped": [],
+                       "policy": policy, "intent": intent["intent"],
+                       "intent_label": intent["label"], "asks": intent["asks"],
+                       "lang": lang, "proofread": proof})
 
 
 @app.get("/recommend/explain/stream", dependencies=[Depends(require("reco.read"))])
@@ -1414,10 +1466,15 @@ def explain_stream(key: Optional[str] = None, summary: str = "", symptom: str = 
                 # 표시는 읽을 때도 건다 — 이 기능 이전에 저장된 캐시본에는 표시가
                 # 없다. 재생성(89초 × 127건)을 요구하지 않고 소급 적용한다. 멱등이라
                 # 새로 생성된 본문에 두 번 붙지 않는다.
-                md = mark_unsupported(hit.get("markdown", ""), hit.get("dropped", []))
+                md = hit.get("markdown", "")
                 for i in range(0, len(md), 400):
                     yield f"data: {json.dumps({'type': 'delta', 'text': md[i:i + 400]}, ensure_ascii=False)}\n\n"
-                yield f"data: {json.dumps({'type': 'done', 'citations': hit.get('citations', []), 'dropped': hit.get('dropped', []), 'cached': True}, ensure_ascii=False)}\n\n"
+                yield ("data: " + json.dumps(
+                    {"type": "done", "cached": True, "text": md,
+                     "policy": hit.get("policy"), "intent_label": hit.get("intent_label", ""),
+                     "asks": hit.get("asks", []), "lang": hit.get("lang", "ko"),
+                     "proofread": hit.get("proofread"),
+                     "citations": hit.get("citations", [])}, ensure_ascii=False) + "\n\n")
                 return
             # 생성은 워커가 맡고 여기서는 따라 읽기만 한다 — 연결이 끊겨도
             # 생성은 계속되고 완료 시 캐시에 들어간다.
@@ -1439,8 +1496,15 @@ def explain_stream(key: Optional[str] = None, summary: str = "", symptom: str = 
                 return
             # 완성본은 워커가 이미 캐시에 넣었다 — 같은 판정(인용/미제공)을 재사용해
             # 두 경로가 다른 답을 내지 않게 한다.
+            # 최종본은 워커가 내부 키를 지우고 정책까지 매긴 판본이다. 스트리밍 중에는
+            # 원문이 스쳐 지나가므로 done 에서 화면을 이 판본으로 교체한다.
             done_hit = _explain_md_cached(query_rec, match_recs) or {}
-            yield f"data: {json.dumps({'type': 'done', 'citations': done_hit.get('citations', []), 'dropped': done_hit.get('dropped', []), 'cached': False}, ensure_ascii=False)}\n\n"
+            yield ("data: " + json.dumps(
+                {"type": "done", "cached": False, "text": done_hit.get("markdown", ""),
+                 "policy": done_hit.get("policy"), "intent_label": done_hit.get("intent_label", ""),
+                 "asks": done_hit.get("asks", []), "lang": done_hit.get("lang", "ko"),
+                 "proofread": done_hit.get("proofread"),
+                 "citations": done_hit.get("citations", [])}, ensure_ascii=False) + "\n\n")
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)[:200]}, ensure_ascii=False)}\n\n"
 
@@ -1779,10 +1843,17 @@ def explain_cached(key: str, k: int = 4):
         return {"cached": False, "coverage": True,
                 "evidence_keys": [m["key"] for m in result["matches"]],
                 "reason": "저장된 분석이 없습니다 — analyze_issue 의 근거로 직접 분석하세요"}
+    # 캐시본은 이제 **고객에게 보낼 답변**이다(심층 분석 생성기가 그렇게 바뀌었다).
+    # 내부 이슈 키는 저장 전에 지워지므로 인용 목록은 비어 있는 것이 정상이다 —
+    # 대신 어떤 근거로 썼는지는 evidence_keys 로, 발송 가능 여부는 policy 로 준다.
     return {"cached": True, "coverage": True,
-            "markdown": mark_unsupported(hit.get("markdown", ""), hit.get("dropped", [])),
+            "kind": "customer_reply",
+            "markdown": hit.get("markdown", ""),
+            "intent": hit.get("intent", ""), "intent_label": hit.get("intent_label", ""),
+            "asks": hit.get("asks", []), "lang": hit.get("lang", "ko"),
+            "policy": hit.get("policy"), "proofread": hit.get("proofread"),
+            "evidence_keys": [m["key"] for m in result["matches"]],
             "citations": hit.get("citations", []),
-            # 근거 없이 언급된 키를 클라이언트(MCP 포함)도 알아야 한다
             "unsupported_mentions": hit.get("dropped", [])}
 
 
@@ -1893,6 +1964,17 @@ def recommend(req: RecommendRequest):
         "coverage": result.get("coverage", bool(result["matches"])),
         "gate": result.get("gate"),
     }
+    # 고객이 무엇을 요청했는지는 답변을 만들기 **전에** 보여야 한다. 화면이 그걸
+    # 모르면 담당자는 증상만 읽고 답을 판단하게 된다 — 답변이 요지를 빗나가는
+    # 가장 흔한 경로다. 규칙 기반이라 비용이 없다.
+    try:
+        _intent = voc_agents.classify(_reply_context(query_rec))
+        out["intent"] = _intent["intent"]
+        out["intent_label"] = _intent["label"]
+        out["asks"] = _intent["asks"]
+        out["customer_ask"] = query_rec.get("customer_ask", "")
+    except Exception:
+        pass
     # 지식 공백 관측성(P3-8): coverage 미통과 질의를 공백 신호로 기록(자기 개선 loop 입력)
     if not out["coverage"]:
         _record_gap(query_rec, result, "no_coverage")
@@ -2066,40 +2148,342 @@ def rca_draft(req: KeyBody):
     return _queue_result(rca_queue.upsert(item))
 
 
-class AnalysisDraftBody(BaseModel):
+# ── 고객 대응(VOC) 답변 ────────────────────────────────────────────────────
+# RCA 초안과 무엇이 다른가: 읽는 사람이 다르다. RCA 는 엔지니어가 읽는 분석이고,
+# 여기 산출물은 **고객이 그대로 받는 글**이다. 그래서 세 가지가 다르다.
+#   · 근거가 없어도 초안을 만든다 — RCA 는 근거 없으면 만들지 않는 게 옳지만
+#     (틀린 원인 단정), 고객 문의는 답을 안 하는 것이 가장 나쁜 실패다.
+#     대신 원인을 단정하지 않는 골격으로 간다.
+#   · 해결된 이슈도 대상이다 — "해결됐습니다" 를 알리는 것도 고객 대응이다.
+#   · 발송 전 정책 검사를 통과해야 한다(내부 키·확정 약속·반말은 차단).
+REPLY_MARKER = preprocess.REPLY_COMMENT_MARKER
+
+
+def _forbidden_names(rec: dict) -> list[str]:
+    """이 답변에 나오면 안 되는 고유명사 — KB 에 있는 **다른 고객사** 이름.
+
+    근거 사례는 남의 고장 이력이다. 사실이어도 고객에게 다른 고객사를 알려주는 순간
+    비밀유지 문제가 된다. 자동으로 지우지 않는다 — 문장 뜻이 바뀌므로 사람이 고쳐야 한다.
+    """
+    mine = str(rec.get("customer", "") or "").strip()
+    names = {str(r.get("customer", "") or "").strip()
+             for r in _reco_state()["by_key"].values()}
+    # 3자 미만은 뺀다 — 짧은 약칭은 본문의 평범한 단어와 겹쳐 오탐이 된다.
+    # 자기 회사 이름은 당연히 써도 된다.
+    return sorted(n for n in names if len(n) >= 3 and n != mine)
+
+
+def _reply_context(rec: dict) -> str:
+    """의도 분류에 쓸 고객 원문 — 요약 + 증상 + 고객 요청 + 조사 스레드."""
+    return "\n".join(str(rec.get(f, "") or "")
+                     for f in ("summary", "symptom", "customer_ask", "investigation"))
+
+
+def _generate_reply(rec: dict, matches: list[dict], proposal: dict | None,
+                    intent: dict, lang: str = "ko") -> tuple[str, str]:
+    """답변 본문 생성. (본문, 엔진) — LLM 이 없거나 실패하면 결정적 템플릿으로 떨어진다.
+
+    고객 대응에서 '생성 실패 = 무응답' 은 허용되지 않는다. 템플릿은 빈약하지만
+    사람이 손볼 초안으로는 유효하고, 어느 경로로 나왔는지 큐에 남긴다.
+    """
+    if os.environ.get("OPENROUTER_API_KEY"):
+        try:
+            guidance = ""
+            try:
+                guidance = draft_feedback.prompt_guidance(
+                    category=rec.get("category", ""),
+                    template=template_key(rec.get("summary", "")))
+            except Exception:
+                pass
+            prompt = voc_agents.reply_prompt(rec, matches, proposal, intent,
+                                             guidance=guidance, lang=lang)
+            body = "".join(_llm_stream(prompt)).strip()
+            if len(body) >= 80 and voc_agents.detect_lang(body) == lang:
+                fixed, _ = _proofread(_strip_preamble(body))
+                return fixed, "llm"
+            elif len(body) >= 80:
+                print(f"[reply] 생성 언어 불일치(기대 {lang}) → 템플릿 사용")
+            else:
+                # 짧은 응답도 실패다. 조용히 템플릿으로 떨어지면 "LLM 경로로 돌렸는데
+                # 전부 템플릿" 인 상태를 아무도 눈치채지 못한다.
+                print(f"[reply] 생성 결과가 너무 짧음({len(body)}자) → 템플릿 사용")
+        except Exception as e:
+            print(f"[reply] LLM 생성 실패 → 템플릿 사용: {str(e)[:160]}")
+    return voc_agents.render_reply(rec, matches, proposal, intent, lang=lang), "template"
+
+
+def _reply_item(rec: dict, key: str, body: str, engine: str,
+                matches: list[dict], intent: dict, lang: str) -> dict:
+    """큐 항목 한 벌. 초안 경로가 둘(자동 생성 / 화면에서 받은 본문)이라 한 곳에서 만든다 —
+    두 곳에서 만들면 재검사 기준(근거·금지어·언어)이 갈라진다."""
+    forbidden = _forbidden_names(rec)
+    policy = voc_agents.check(body, has_evidence=bool(matches), forbidden=tuple(forbidden),
+                              lang=lang, asks=intent["asks"])
+    return {
+        "key": key, "summary": rec.get("summary", ""), "status": rec.get("status", ""),
+        "body": body, "intent": intent["intent"], "intent_label": intent["label"],
+        "asks": intent["asks"], "engine": engine, "lang": lang,
+        "evidence": [m["key"] for m in matches[:3]],   # 내부 추적용(본문에는 없음)
+        "has_evidence": bool(matches),
+        "forbidden": forbidden,      # 재검사(편집·발송)가 같은 기준을 쓰도록 함께 보관
+        "policy": policy,
+        # 근거가 없거나, 정책 위반이 남아 있거나, 돈·감정이 걸린 유형이면 사람이 반드시 본다.
+        # 템플릿 초안도 항상 검토 대상이다 — 그 폴백은 접수 사실과 진행 계획만 말하고
+        # 고객의 질문에 실제로 답하지 않는다(측정: 요청 반영 3/32 vs LLM 31/32).
+        "needs_review": (not matches) or (not policy["ok"])
+                        or intent["intent"] in ("rma_request", "complaint")
+                        or engine == "template",
+        "created_at": _dt.datetime.now().isoformat(timespec="seconds"),
+        "state": "pending",
+    }
+
+
+def _queue_reply(item: dict, prev: dict | None) -> dict:
+    """큐 적재 — 이미 발송된 건이면 이전 판본을 history 로 보존하고 대체한다."""
+    if prev and prev.get("state") == "approved":
+        item["history"] = (prev.get("history") or []) + [{
+            "body": prev.get("final_body") or prev.get("body", ""),
+            "comment_id": prev.get("comment_id", ""), "sent_at": prev.get("sent_at", ""),
+            "sender": prev.get("sender", ""), "edited": bool(prev.get("edited")),
+        }]
+        saved = reply_queue.supersede(item)
+        return {"queued": True, "reason_code": "queued_followup",
+                "reason": f"후속 답변 초안을 만들었습니다 (이전 발송 {len(item['history'])}건 보존).",
+                "item": saved, "counts": reply_queue.counts()}
+    item["history"] = (prev.get("history") if prev else None) or []
+    saved = reply_queue.upsert(item)
+    return {"queued": True, "reason_code": "queued",
+            "reason": "발송 대기 큐에 추가됨 (검토·수정 후 발송).",
+            "item": saved, "counts": reply_queue.counts()}
+
+
+def _already_sent(prev: dict | None, again: bool) -> dict | None:
+    if prev and prev.get("state") == "approved" and not again:
+        return {"queued": False, "reason_code": "already_sent",
+                "reason": "이미 발송된 답변이 있습니다. 후속 답변을 쓰려면 "
+                          "'다시 초안'(again)으로 요청하세요.",
+                "item": prev, "counts": reply_queue.counts()}
+    return None
+
+
+class ReplyDraftBody(BaseModel):
     key: str
-    analysis_md: str            # 화면에 표시된 시니어 종합 분석(마크다운)
-    citations: list[str] = []   # 검증된 인용 키
+    use_llm: bool = True
+    again: bool = False     # 이미 발송한 건에 **후속 답변**을 새로 쓴다
 
 
-@app.post("/rca/draft-from-analysis", dependencies=[Depends(require("rca.draft"))])
-def rca_draft_from_analysis(req: AnalysisDraftBody):
-    """시니어 종합 분석(LLM)을 RCA 댓글 본문으로 → 승인 큐. 생성물이라 항상 검토 필요."""
+@app.post("/voc/reply/draft", dependencies=[Depends(require("reply.draft"))])
+def voc_reply_draft(req: ReplyDraftBody):
+    """고객 문의 → 고객에게 보낼 답변 초안 → **발송 대기 큐**. 외부 발송 없음."""
     st = _reco_state()
     rec = st["by_key"].get(req.key)
     if not rec:
         return _not_queued("not_found", f"이슈 {req.key} 를 KB에서 찾을 수 없습니다.")
-    if rec.get("status") == RESOLVED_STATUS:
-        return _not_queued("resolved", "이미 해결(완료)된 이슈입니다 — 미해결 이슈만 RCA 대상입니다.")
-    if not (req.analysis_md or "").strip():
-        return _not_queued("empty_analysis", "분석 본문이 비어 있습니다. 먼저 '✨ AI 심층 분석'을 생성하세요.")
-    # 인용 검증: 본문/전달 키 ∩ KB 키 (환각 차단)
-    valid = set(st["by_key"].keys())
-    cited = sorted({k for k in (set(req.citations) | issue_keys.find_set(req.analysis_md))} & valid)
-    cited_str = ", ".join(cited) if cited else "없음"
-    body = (
-        f"🤖 **{BOT_MARKER}** (RCA-bot · AI 심층 분석 · 근거: {cited_str})\n\n"
-        f"{_strip_preamble(req.analysis_md)}\n\n"
-        f"_과거 해결 이슈 기반 AI 심층 분석 (사람 승인 후 게시)._")
-    item = {
-        "key": req.key, "summary": rec.get("summary", ""), "status": rec.get("status", ""),
-        "body": body, "confidence": None, "based_on_verified": False,
-        "needs_review": True,  # LLM 생성물 → 항상 사람 검토
-        "based_on": cited_str, "source": "analysis",
-        "created_at": _dt.datetime.now().isoformat(timespec="seconds"),
-        "state": "pending",
+    # 이미 발송된 건이면 **생성 전에** 멈춘다 — 뒤에서 막으면 LLM 비용을 치르고
+    # 버리는 초안을 만들게 된다.
+    prev = reply_queue.get(req.key)
+    stop = _already_sent(prev, req.again)
+    if stop:
+        return stop
+    result = st["reco"].recommend(rec, k=4, exclude_key=req.key)
+    matches = result.get("matches", []) if result.get("coverage") else []
+    proposal = result.get("proposal") if result.get("coverage") else None
+    if not matches:
+        # 근거 없이도 답은 나간다. 다만 '무엇을 몰랐는지' 는 공백 신호로 남긴다 —
+        # 남기지 않으면 지식 공백이 고객 응대 품질로만 새어 나가고 집계되지 않는다.
+        _record_gap(rec, result, "reply_no_evidence")
+    ctx = _reply_context(rec)
+    intent = voc_agents.classify(ctx)
+    # 고객이 쓴 언어로 답한다. 내용이 정확해도 언어가 다르면 대응 실패다.
+    lang = voc_agents.detect_lang(ctx)
+    body, engine = ((voc_agents.render_reply(rec, matches, proposal, intent, lang=lang), "template")
+                    if not req.use_llm else _generate_reply(rec, matches, proposal, intent, lang))
+    # 내부 키는 규칙으로 막기 전에 지운다 — 모델이 규칙을 어겨도 고객에게는 안 나간다.
+    body = voc_agents.redact(body)
+    return _queue_reply(_reply_item(rec, req.key, body, engine, matches, intent, lang), prev)
+
+
+class ReplyFromTextBody(BaseModel):
+    key: str
+    body: str
+    again: bool = False
+
+
+@app.post("/voc/reply/draft-from-text", dependencies=[Depends(require("reply.draft"))])
+def voc_reply_draft_from_text(req: ReplyFromTextBody):
+    """화면에서 생성·확인한 답변을 **그대로** 발송 대기 큐로.
+
+    다시 만들지 않는다 — 재생성하면 사람이 읽고 판단한 글과 큐에 들어가는 글이
+    달라진다. 검토의 의미가 사라지는 종류의 실수다.
+    """
+    st = _reco_state()
+    rec = st["by_key"].get(req.key)
+    if not rec:
+        return _not_queued("not_found", f"이슈 {req.key} 를 KB에서 찾을 수 없습니다.")
+    if not (req.body or "").strip():
+        return _not_queued("empty_body",
+                           "답변 본문이 비어 있습니다. 먼저 '✨ AI 고객 응대 답변'을 생성하세요.")
+    prev = reply_queue.get(req.key)
+    stop = _already_sent(prev, req.again)
+    if stop:
+        return stop
+    result = _recommend_cached(rec, k=4, exclude_key=req.key)
+    matches = result.get("matches", []) if result.get("coverage") else []
+    ctx = _reply_context(rec)
+    intent = voc_agents.classify(ctx)
+    lang = voc_agents.detect_lang(ctx)
+    body = voc_agents.redact(req.body.strip())
+    item = _reply_item(rec, req.key, body, "llm", matches, intent, lang)
+    item["needs_review"] = True     # 화면을 거쳤어도 생성물인 것은 같다
+    return _queue_reply(item, prev)
+
+
+@app.get("/voc/reply/status", dependencies=[Depends(require("reply.read"))])
+def voc_reply_status(key: str):
+    """이 문의의 답변 상태 — 없음 / 발송 대기 / 발송됨.
+
+    화면이 이걸 모르면 담당자가 이미 답장한 문의에 또 초안을 만든다.
+    """
+    it = reply_queue.get(key)
+    if not it:
+        return {"key": key, "state": "none"}
+    return {"key": key, "state": it.get("state", "pending"),
+            "needs_review": bool(it.get("needs_review")),
+            "policy": it.get("policy"), "intent_label": it.get("intent_label", ""),
+            "sent_at": it.get("sent_at", ""), "comment_id": it.get("comment_id", ""),
+            "history": len(it.get("history") or [])}
+
+
+@app.get("/voc/reply/pending", dependencies=[Depends(require("reply.read"))])
+def voc_reply_pending():
+    return {"items": reply_queue.items("pending"), "counts": reply_queue.counts()}
+
+
+@app.get("/voc/reply/intents", dependencies=[Depends(require("reply.read"))])
+def voc_reply_intents():
+    """요청 유형 분류 체계 — UI 가 라벨/골격을 하드코딩하지 않도록 서버가 내려준다."""
+    return {"intents": [{"code": k, "label": v["label"], "goal": v["goal"],
+                         "sections": list(v["sections"])} for k, v in voc_agents.INTENTS.items()],
+            "blocking": list(voc_agents.BLOCKING)}
+
+
+class ReplyCheckBody(BaseModel):
+    body: str
+    key: str = ""                # 주면 큐 항목에서 검사 기준을 그대로 가져온다
+    has_evidence: bool = True
+
+
+@app.post("/voc/reply/check", dependencies=[Depends(require("reply.draft"))])
+def voc_reply_check(req: ReplyCheckBody):
+    """사람이 고친 본문 재검사 — 편집 중에도 발송 가능 여부를 바로 본다.
+
+    기준(근거 유무·금지 고유명사·언어)은 **큐 항목이 정본**이다. 클라이언트가 보낸
+    값으로만 검사하면 편집 화면의 판정이 발송 시점 판정보다 느슨해질 수 있다.
+    """
+    item = reply_queue.get(req.key) if req.key else None
+    has_ev = bool(item.get("has_evidence")) if item else req.has_evidence
+    forbidden = tuple(item.get("forbidden") or ()) if item else ()
+    lang = str(item.get("lang") or "ko") if item else "ko"
+    return voc_agents.check(req.body, has_evidence=has_ev, forbidden=forbidden, lang=lang,
+                            asks=(item.get("asks") or []) if item else ())
+
+
+class ReplySendBody(BaseModel):
+    key: str
+    body: Optional[str] = None   # 사람이 수정한 본문(있으면 이걸 발송)
+    note: str = ""
+
+
+@app.post("/voc/reply/send", dependencies=[Depends(require("reply.send"))])
+def voc_reply_send(req: ReplySendBody, request: Request):
+    """HITL 게이트 — 사람 승인 시에만 고객에게 나간다(Jira 댓글로 게시).
+
+    정책 차단(block)이 남아 있으면 **발송하지 않는다**. 경고(warn)는 사람이 보고
+    판단할 몫이라 막지 않는다 — 전부 막으면 검토자가 검사 자체를 무시하게 된다.
+    """
+    item = reply_queue.get(req.key)
+    if not item:
+        return {"ok": False, "error": "발송 대기 큐에 없습니다."}
+    if item.get("state") == "approved":
+        return {"ok": True, "already": True, "item": item}
+    original = item.get("body", "")
+    final = (req.body if (req.body and req.body.strip()) else original)
+    policy = voc_agents.check(final, has_evidence=bool(item.get("has_evidence")),
+                              forbidden=tuple(item.get("forbidden") or ()),
+                              lang=str(item.get("lang") or "ko"),
+                              asks=item.get("asks") or [])
+    if policy["blocked"]:
+        return {"ok": False, "error": "정책 위반이 남아 있어 발송하지 않았습니다.",
+                "policy": policy}
+    try:
+        from jira_commenter import post_comment
+        body_out = f"📮 **{REPLY_MARKER}**\n\n{final}"
+        res = post_comment(req.key, _md_to_jira(body_out))
+        updated = reply_queue.set_state(
+            req.key, "approved", comment_id=str(res.get("id", "")), final_body=final,
+            edited=(original.strip() != final.strip()), policy=policy,
+            note=(req.note or "")[:1000], sender=_actor(request),
+            sent_at=_dt.datetime.now().isoformat(timespec="seconds"))
+        return {"ok": True, "item": updated, "policy": policy,
+                "edited": original.strip() != final.strip(),
+                "counts": reply_queue.counts(), "stats": _reply_stats()}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+
+
+class ReplyRejectBody(BaseModel):
+    key: str
+    reason: str = ""
+
+
+@app.post("/voc/reply/reject", dependencies=[Depends(require("reply.send"))])
+def voc_reply_reject(req: ReplyRejectBody, request: Request):
+    """거부 — 사유를 함께 남긴다. 왜 못 나갔는지가 남지 않으면 다음 초안이 같은 실수를 한다."""
+    updated = reply_queue.set_state(req.key, "rejected",
+                                    reject_reason=(req.reason or "")[:1000],
+                                    reviewer=_actor(request))
+    return {"ok": bool(updated), "item": updated, "counts": reply_queue.counts(),
+            "stats": _reply_stats()}
+
+
+def _reply_stats() -> dict:
+    """고객 답변 품질 — 무수정 발송률·발송률·유형 분포·차단 원인.
+
+    RCA 초안 지표(draft_feedback)와 **섞지 않는다**. 읽는 사람도 실패의 의미도
+    다르므로, 한 지표로 합치면 어느 쪽이 나빠졌는지 알 수 없다.
+    """
+    from collections import Counter
+    all_items = reply_queue.items()
+    # 후속 답변으로 대체된 판본도 **고객에게 나간 글**이다. 빼면 발송 건수가 줄어들어
+    # 지표가 실제보다 좋아 보인다(무수정 발송률의 분모가 사라진다). 판정 수에도 같이
+    # 넣어야 한다 — 한쪽에만 넣으면 발송률이 1을 넘는다.
+    history = [h for x in all_items for h in (x.get("history") or [])]
+    decided = ([x for x in all_items if x.get("state") in ("approved", "rejected")]
+               + history)
+    sent = [x for x in all_items if x.get("state") == "approved"] + history
+    clean = [x for x in sent if not x.get("edited")]
+    causes = Counter()
+    for x in all_items:
+        for v in (x.get("policy") or {}).get("violations", []):
+            causes[v["code"]] += 1
+    return {
+        "total": len(all_items) + len(history),
+        "pending": sum(1 for x in all_items if x.get("state") == "pending"),
+        "sent": len(sent), "decided": len(decided),
+        "followups": len(history),
+        "clean_rate": round(len(clean) / len(sent), 3) if sent else None,
+        "send_rate": round(len(sent) / len(decided), 3) if decided else None,
+        "by_intent": dict(Counter(x.get("intent", "other") for x in all_items)),
+        "by_engine": dict(Counter(x.get("engine", "") for x in all_items)),
+        "by_lang": dict(Counter(x.get("lang", "ko") for x in all_items)),
+        "policy_violations": dict(causes),
+        "no_evidence": sum(1 for x in all_items if not x.get("has_evidence")),
     }
-    return _queue_result(rca_queue.upsert(item))
+
+
+@app.get("/voc/reply/stats", dependencies=[Depends(require("reply.read"))])
+def voc_reply_stats():
+    return _reply_stats()
 
 
 @app.get("/rca/pending", dependencies=[Depends(require("rca.read"))])

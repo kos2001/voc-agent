@@ -44,11 +44,14 @@ _USER_CAPS = {
     "rca.draft",         # RCA 초안 생성 → 승인 대기 큐 (게시 아님)
     "rca.read",          # 승인 대기 목록 조회
     "feedback.write",    # 추천 유용성 피드백 · VOC 제출
+    "reply.draft",       # 고객 답변 초안 생성 → 발송 대기 큐 (발송 아님)
+    "reply.read",        # 발송 대기 답변 조회
 }
 
 # 관리자(admin)는 사용자 기능 전부 + 운영 기능.
 _ADMIN_ONLY_CAPS = {
     "rca.approve",       # Jira 실제 게시 / 거부 — 외부로 나가는 행위
+    "reply.send",        # 고객 답변 실제 발송 / 거부 — 고객에게 나가는 행위
     "knowledge.write",   # 고장모드 기사·수명주기·온톨로지·부정지식·소유자 편집
     "config.write",      # LLM/Jira 접속 설정 변경
     "ops.sync",          # Jira 동기화·재적재·추천기 리로드

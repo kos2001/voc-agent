@@ -29,7 +29,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 CACHE_DIR = ROOT / "tmp_db" / "llm_cache"
 
-PROMPT_VERSION = "2026-08-02.1"  # 근거/배경/추정 구분 요구 추가
+PROMPT_VERSION = "2026-08-30.1"  # 심층 분석 → 에이전트 고객 응대 답변으로 전환
 
 # 캐시 유효기간(초). 0 이면 무기한. 내용이 바뀌면 키가 달라지므로 만료는 보조 장치일
 # 뿐이다 — 모델 쪽이 조용히 바뀌는 경우를 대비한 안전망.

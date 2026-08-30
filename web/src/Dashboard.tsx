@@ -109,6 +109,8 @@ export default function Dashboard({ onOpenIssue, can }: {
   can: (cap: string) => boolean;
 }) {
   // VOC 에이전트의 헤드라인 지표 — 초안이 사람 손을 안 타고 나갔는가.
+  // 고객에게 실제로 나간 글의 성패 — 이 서비스의 최종 산출물이다.
+  const reply = useEndpoint<any>("/voc/reply/stats");
   const draft = useEndpoint<any>("/rca/draft-feedback");
   const sources = useEndpoint<any>("/knowledge/sources");
 
@@ -157,14 +159,55 @@ export default function Dashboard({ onOpenIssue, can }: {
 
   return (
     <div className="h-full overflow-y-auto bg-zinc-950 px-6 pb-10 pt-8 sm:px-8">
-      <PageHeader title="VOC 답변 현황"
-        description="초안 품질(고객에게 나가는 답변) + 그 답변을 떠받치는 지식 자산의 상태" />
+      <PageHeader title="VOC 대응 현황"
+        description="고객에게 나간 답변의 성패 + 그 답변을 떠받치는 지식 자산의 상태" />
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {/* 초안 품질 — VOC 에이전트의 헤드라인. 다른 카드는 전부 '중간 과정'을 보지만
-            이것만 최종 산출물(고객에게 나가는 답변)의 성패를 본다. 그래서 맨 앞이다. */}
-        <Card title="초안 품질" wide
-          hint="사람이 손대지 않고 게시된 비율 — 이 서비스가 실제로 잘하고 있는지의 1차 지표"
+        {/* 고객 답변 — 유일하게 **고객이 직접 받는** 산출물이다. 그래서 맨 앞이다.
+            RCA 초안 품질(다음 카드)과 섞지 않는다: 읽는 사람도 실패의 의미도 다르다. */}
+        <Card title="고객 답변" wide
+          hint="고객에게 나간 답변 — 무수정 발송률·발송률·요청 유형·정책 차단"
+          loading={reply.loading} error={reply.error} onRetry={reply.reload}>
+          {(reply.data?.total ?? 0) === 0 ? (
+            <EmptyState message="아직 작성된 고객 답변이 없습니다. 분석 화면에서 “📮 고객 답변 초안”을 만들면 여기에 쌓입니다." />
+          ) : (
+            <>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">
+                <StatTile label="무수정 발송" value={pct(reply.data.clean_rate)}
+                  tone={rateTone(reply.data.clean_rate, 0.5, 0.75)}
+                  title="사람이 손대지 않고 그대로 나간 비율" />
+                <StatTile label="발송률" value={pct(reply.data.send_rate)}
+                  tone={rateTone(reply.data.send_rate, 0.6, 0.85)}
+                  title="판정된 초안 중 실제로 발송된 비율" />
+                <StatTile label="발송 대기" value={reply.data.pending} />
+                <StatTile label="근거 없이 작성" value={reply.data.no_evidence}
+                  tone={reply.data.no_evidence ? "warn" : "neutral"}
+                  title="유사 사례를 못 찾아 원인을 단정하지 않는 골격으로 쓴 건수 — 지식 공백" />
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {Object.entries(reply.data.by_intent ?? {}).map(([k, v]) => (
+                  <span key={k} className="rounded-full border border-zinc-700 px-2 py-0.5 text-[11px] text-zinc-300">
+                    {k} {v as number}
+                  </span>
+                ))}
+              </div>
+              {Object.keys(reply.data.policy_violations ?? {}).length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {Object.entries(reply.data.policy_violations).map(([k, v]) => (
+                    <span key={k} className="rounded-full border border-amber-700 px-2 py-0.5 text-[11px] text-amber-300"
+                      title="발송 전 정책 검사에 걸린 항목 — 차단은 고쳐야 나가고, 경고는 사람이 판단한다">
+                      {k} {v as number}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </Card>
+
+        {/* RCA 초안 품질 — 엔지니어가 읽는 분석의 성패. 고객 답변과 분리해서 본다. */}
+        <Card title="RCA 초안 품질" wide
+          hint="RCA 분석 초안이 사람 손을 안 타고 게시된 비율 — 엔지니어용 산출물 지표"
           loading={draft.loading} error={draft.error} onRetry={draft.reload}>
           {(draft.data?.stats?.judged ?? 0) === 0 ? (
             <EmptyState message="아직 판정된 초안이 없습니다. 승인 대기 화면에서 초안을 승인·거부하면 여기에 쌓입니다." />

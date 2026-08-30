@@ -9,6 +9,7 @@
  *   #/issue/LSI-7     → 분석 화면 + LSI-7 선택
  *   #/dashboard       → 지식 현황
  *   #/rca             → RCA 승인 대기
+ *   #/reply           → 고객 답변 발송 대기
  *   #/voc             → VOC
  *   #/settings        → 설정
  */
@@ -19,6 +20,7 @@ export type Route =
   | { view: "app"; key?: string }
   | { view: "dashboard" }
   | { view: "rca" }
+  | { view: "reply" }
   | { view: "voc" }
   | { view: "settings" };
 
@@ -28,6 +30,7 @@ export function parseHash(hash: string): Route {
   switch (head) {
     case "dashboard": return { view: "dashboard" };
     case "rca": return { view: "rca" };
+    case "reply": return { view: "reply" };
     case "voc": return { view: "voc" };
     case "settings": return { view: "settings" };
     case "issue": return { view: "app", key: arg ? decodeURIComponent(arg).toUpperCase() : undefined };
@@ -39,6 +42,7 @@ export function routeToHash(r: Route): string {
   switch (r.view) {
     case "dashboard": return "#/dashboard";
     case "rca": return "#/rca";
+    case "reply": return "#/reply";
     case "voc": return "#/voc";
     case "settings": return "#/settings";
     default: return r.key ? `#/issue/${encodeURIComponent(r.key)}` : "#/";

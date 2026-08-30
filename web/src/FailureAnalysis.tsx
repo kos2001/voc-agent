@@ -25,7 +25,11 @@ type Gate = {
   rerank_top?: number; threshold?: number;
   max_cos?: number; cos_threshold?: number; top_entity_overlap?: number;
 };
-type RecoResp = { query: any; matches: Match[]; proposal: Proposal | null; coverage: boolean; gate?: Gate | null; explanation?: string; explanation_citations?: string[]; explanation_dropped_citations?: string[]; explanation_cached?: boolean };
+type RecoResp = { query: any; matches: Match[]; proposal: Proposal | null; coverage: boolean; gate?: Gate | null; explanation?: string; explanation_citations?: string[]; explanation_dropped_citations?: string[]; explanation_cached?: boolean;
+  reply_policy?: { ok: boolean; blocked: boolean; violations: { code: string; severity: string; detail: string }[] } | null;
+  reply_intent?: string; reply_asks?: string[]; reply_lang?: string;
+  reply_proofread?: { ran?: boolean; applied?: boolean; rejected?: string; error?: string } | null;
+  intent?: string; intent_label?: string; asks?: string[]; customer_ask?: string };
 
 // 분류 칩 — 다크 배경에서 읽히도록 -950/60 배경 + -400 글자(하네스 배지 규칙).
 const CAT_COLOR: Record<string, string> = {
@@ -284,7 +288,8 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
     closeStream();
     activeKey.current = key;
     setExplaining(true);
-    setReco((prev) => (prev ? { ...prev, explanation: "", explanation_citations: [], explanation_dropped_citations: [], explanation_cached: undefined } : prev));
+    setReco((prev) => (prev ? { ...prev, explanation: "", explanation_cached: undefined,
+                                reply_policy: null, reply_intent: "", reply_asks: [] } : prev));
     setInvMd(""); setInvErr(""); setInvBusy(false);
     // withCredentials: SSE 도 쿠키 세션을 실어야 한다(전역 fetch 래퍼가 못 덮는 경로).
     const es = new EventSource(
@@ -303,9 +308,16 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
       if (d.type === "delta") {
         setReco((prev) => (prev ? { ...prev, explanation: (prev.explanation || "") + d.text } : prev));
       } else if (d.type === "done") {
-        setReco((prev) => (prev ? { ...prev, explanation_citations: d.citations || [],
-                                    explanation_dropped_citations: d.dropped || [],
-                                    explanation_cached: d.cached } : prev));
+        // 최종본으로 갈아끼운다 — 스트리밍 중에는 모델이 쓴 원문이 스쳐 지나가고,
+        // 서버가 내부 키를 지우고 정책까지 매긴 판본은 done 에만 있다.
+        setReco((prev) => (prev ? { ...prev,
+                                    explanation: d.text || prev.explanation,
+                                    explanation_cached: d.cached,
+                                    reply_policy: d.policy ?? null,
+                                    reply_intent: d.intent_label || "",
+                                    reply_asks: d.asks || [],
+                                    reply_lang: d.lang || "ko",
+                                    reply_proofread: d.proofread ?? null } : prev));
         finish();
       } else if (d.type === "error") {
         setReco((prev) => (prev ? { ...prev, explanation: (prev.explanation || "") + `\n\n_(생성 오류: ${d.message})_` } : prev));
@@ -341,20 +353,64 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
     } catch (e: any) { setDraftMsg({ sev: "warn", text: e.message }); } finally { setDrafting(false); }
   };
 
-  // AI 심층 분석(LLM) → HITL 승인 대기 큐 (생성물이라 항상 검토 후 게시)
-  const [draftingAn, setDraftingAn] = useState(false);
-  const [draftAnMsg, setDraftAnMsg] = useState<QMsg>(null);
-  const draftFromAnalysis = async () => {
-    if (!sel || !reco?.explanation) return;
-    setDraftingAn(true); setDraftAnMsg(null);
+  // 화면의 고객 응대 답변 → 발송 대기 큐. 본문을 **그대로** 보낸다 —
+  // 서버가 다시 생성하면 사람이 읽고 판단한 글과 큐에 들어가는 글이 달라진다.
+  // 이 화면의 목적은 '대응' 이므로, 지표도 대응 진행도를 본다.
+  const [replyStats, setReplyStats] = useState<any>(null);
+  const loadReplyStats = () => fetch(`${API}/voc/reply/stats`).then((r) => (r.ok ? r.json() : null))
+    .then((d) => d && setReplyStats(d)).catch(() => {});
+  useEffect(() => { loadReplyStats(); }, []);
+  // 선택한 문의의 답변 상태 — 이미 답장한 건에 또 초안을 만드는 것을 막는다.
+  const [replyStatus, setReplyStatus] = useState<any>(null);
+  useEffect(() => {
+    setReplyStatus(null);
+    if (!sel?.key) return;
+    fetch(`${API}/voc/reply/status?key=${encodeURIComponent(sel.key)}`)
+      .then((r) => (r.ok ? r.json() : null)).then((d) => d && setReplyStatus(d)).catch(() => {});
+  }, [sel?.key]);
+
+  // 근거가 없을 때의 답변. 원인을 단정하지 않는 골격으로 가되, **답은 나간다** —
+  // 고객 대응에서 무응답이 가장 나쁜 실패다. 근거가 없으므로 스트리밍 경로(게이트에
+  // 막힌다) 대신 큐 직행 경로를 쓴다.
+  const [ackBusy, setAckBusy] = useState(false);
+  const [ackMsg, setAckMsg] = useState<QMsg>(null);
+  const draftAck = async () => {
+    if (!sel) return;
+    setAckBusy(true); setAckMsg(null);
     try {
-      const d = await fetch(`${API}/rca/draft-from-analysis`, {
+      const d = await fetch(`${API}/voc/reply/draft`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key: sel.key, analysis_md: reco.explanation, citations: reco.explanation_citations ?? [] }),
+        body: JSON.stringify({ key: sel.key, again: replyStatus?.state === "approved" }),
       }).then((r) => r.json());
-      setDraftAnMsg(qmsgOf(d));
-      if (d.queued) onQueueChange?.();
-    } catch (e: any) { setDraftAnMsg({ sev: "warn", text: e.message }); } finally { setDraftingAn(false); }
+      setAckMsg(d?.queued
+        ? { sev: "ok", text: d.reason || "발송 대기 큐에 추가됨" }
+        : { sev: d?.reason_code === "already_sent" ? "info" : "warn",
+            text: d?.reason || d?.error || "큐에 추가하지 못했습니다" });
+      if (d?.queued) { onQueueChange?.(); loadReplyStats(); setReplyStatus({ state: "pending" }); }
+    } catch (e: any) { setAckMsg({ sev: "warn", text: e.message }); }
+    finally { setAckBusy(false); }
+  };
+
+  const [queueing, setQueueing] = useState(false);
+  const [queueMsg, setQueueMsg] = useState<QMsg>(null);
+  const [replySent, setReplySent] = useState(false);
+  useEffect(() => { setQueueMsg(null); setReplySent(false); }, [sel?.key]);
+  const queueReply = async () => {
+    if (!sel || !reco?.explanation) return;
+    setQueueing(true); setQueueMsg(null);
+    try {
+      const d = await fetch(`${API}/voc/reply/draft-from-text`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key: sel.key, body: reco.explanation, again: replySent }),
+      }).then((r) => r.json());
+      setReplySent(d?.reason_code === "already_sent");
+      setQueueMsg(d?.queued
+        ? { sev: "ok", text: d.reason || "발송 대기 큐에 추가됨" }
+        : { sev: d?.reason_code === "already_sent" ? "info" : "warn",
+            text: d?.reason || d?.error || "큐에 추가하지 못했습니다" });
+      if (d?.queued) { onQueueChange?.(); loadReplyStats(); setReplyStatus({ state: "pending" }); }
+    } catch (e: any) { setQueueMsg({ sev: "warn", text: e.message }); }
+    finally { setQueueing(false); }
   };
 
   // P1-3 추천 유용성 피드백 — 매치별 도움됨/아님 + 실제 근본원인 라벨 수집
@@ -536,7 +592,7 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
         <div className="p-4 border-b border-zinc-800">
           <div className="flex items-center justify-between mb-2">
             <div className="text-xs font-medium uppercase tracking-wider text-zinc-400">
-              미해결 이슈 {filterOn ? `${filtered.length} / ${issues.length}` : `${issues.length}`}건
+              미답변 문의 {filterOn ? `${filtered.length} / ${issues.length}` : `${issues.length}`}건
             </div>
             {/* 22×16px 이던 것을 28×28 로 — 마우스로도 집기 어려운 크기였다.
                 글자는 그대로 두고 클릭 영역만 넓힌다. */}
@@ -578,7 +634,7 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
           )}
         </div>
         <div className="flex-1 overflow-y-auto" role="listbox"
-          aria-label={`미해결 이슈 ${filtered.length}건 — 위아래 방향키로 이동`}>
+          aria-label={`미답변 고객 문의 ${filtered.length}건 — 위아래 방향키로 이동`}>
           {listErr && (
             <div className="m-3 rounded-lg border border-red-900/60 bg-red-950/40 px-3 py-2 text-xs text-red-400">
               이슈 목록을 불러오지 못했습니다 — {listErr}
@@ -640,9 +696,9 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
         <header className="px-6 pt-8 sm:px-8">
           <div className="mb-5 flex items-start justify-between gap-4">
             <div>
-              <h1 className="text-2xl font-semibold tracking-tight text-zinc-50">불량 분석</h1>
+              <h1 className="text-2xl font-semibold tracking-tight text-zinc-50">VOC 대응</h1>
               <p className="mt-1.5 text-sm text-zinc-300">
-                과거 해결 이슈 기반 근본원인·해결책 추천 · graph/BM25 hybrid retrieval
+                고객 문의에 보낼 답변을 만들고, 검토한 뒤 발송합니다 — 과거 해결 사례가 근거입니다
               </p>
             </div>
             <FreshnessBadge onSynced={() => {
@@ -654,8 +710,10 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
           </div>
           {stats && (
             <dl className="mb-5 flex flex-wrap gap-x-6 gap-y-2 text-xs">
-              {[["해결 KB", `${stats.resolved}건`], ["고장 템플릿", `${stats.templates}종`],
-                ["미해결", `${stats.unresolved}건`], ["검색정확도", "P@1 1.0"]].map(([k, v]) => (
+              {[["미답변 문의", `${stats.unresolved}건`],
+                ["발송 대기", `${replyStats?.pending ?? 0}건`],
+                ["발송됨", `${replyStats?.sent ?? 0}건`],
+                ["근거 KB", `${stats.resolved}건`]].map(([k, v]) => (
                 <div key={k} className="flex items-baseline gap-1.5">
                   <dt className="text-zinc-400">{k}</dt>
                   <dd className="font-medium text-zinc-200 tabular-nums">{v}</dd>
@@ -667,11 +725,11 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
             className="flex max-w-md gap-2">
             <input
               value={keyInput} onChange={(e) => setKeyInput(e.target.value)}
-              placeholder="Jira 이슈 번호 입력 (예: LSI-7 또는 7)"
+              placeholder="문의 번호 입력 (예: VOC-66 또는 66)"
               className={inputCls}
             />
             <Button type="submit" disabled={loading || explaining} className="shrink-0">
-              에이전트 분석
+              문의 열기
             </Button>
           </form>
         </header>
@@ -683,9 +741,9 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
         <p className="sr-only" role="status" aria-live="polite">
           {err ? `오류: ${err}`
             : loading ? "유사 사례를 검색하는 중입니다"
-            : explaining ? "AI 심층 분석을 생성하는 중입니다"
+            : explaining ? "고객 응대 답변을 생성하는 중입니다"
             : reco && !reco.coverage ? "유사한 과거 해결 사례를 찾지 못했습니다. 시니어 검토가 필요합니다"
-            : reco ? `유사 사례 ${reco.matches.length}건을 찾았습니다`
+            : reco ? `근거 사례 ${reco.matches.length}건을 찾았습니다`
             : ""}
         </p>
 
@@ -697,8 +755,8 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
 
         {!sel && !err ? (
           <div className="p-16 text-center text-sm text-zinc-400">
-            위에 Jira 이슈 번호(예: LSI-7)를 입력하거나, ← 왼쪽에서 미해결 이슈를 선택하면
-            과거 해결 사례 기반 근본원인·해결책을 에이전트가 분석합니다.
+            ← 왼쪽에서 고객 문의를 고르거나 위에 문의 번호를 입력하세요.
+            에이전트가 과거 해결 사례를 근거로 <b>고객에게 보낼 답변</b>을 만듭니다.
           </div>
         ) : !sel ? null : (
           <div className="p-8 space-y-6 w-full">
@@ -714,6 +772,34 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
               </div>
               <h2 className="font-semibold text-lg leading-snug">{sel.summary}</h2>
               <p className="mt-2 text-sm text-zinc-300">{sel.symptom}</p>
+
+              {/* 고객이 무엇을 요청했는지를 답변을 만들기 **전에** 보여준다.
+                  증상만 읽고 답을 판단하면 요지를 빗나간다 — 초안 거부 사유 1순위다. */}
+              {(reco?.asks?.length ?? 0) > 0 && (
+                <div className="mt-3 rounded-lg border border-sky-900/60 bg-sky-950/20 p-3">
+                  <div className="text-[11px] text-sky-300">
+                    고객이 요청한 것{reco?.intent_label ? ` · ${reco.intent_label}` : ""}
+                  </div>
+                  <ul className="mt-1 space-y-0.5 text-[13px] text-zinc-200">
+                    {reco!.asks!.map((a, i) => <li key={i}>· {a}</li>)}
+                  </ul>
+                </div>
+              )}
+
+              {replyStatus && replyStatus.state !== "none" && (
+                <div className={`mt-3 rounded-lg border px-3 py-2 text-[12px] ${
+                  replyStatus.state === "approved"
+                    ? "border-emerald-800 bg-emerald-950/30 text-emerald-300"
+                    : replyStatus.state === "rejected"
+                    ? "border-zinc-700 bg-zinc-900 text-zinc-400"
+                    : "border-amber-800 bg-amber-950/30 text-amber-300"}`}>
+                  {replyStatus.state === "approved"
+                    ? `이 문의에는 이미 답변을 발송했습니다${replyStatus.sent_at ? ` (${replyStatus.sent_at})` : ""}. 아래에서 후속 답변을 만들 수 있습니다.`
+                    : replyStatus.state === "rejected"
+                    ? "이전 초안은 거부되었습니다. 다시 만들 수 있습니다."
+                    : "이 문의의 답변이 발송 대기 중입니다 — 상단바 📮 고객 답변에서 검토·발송하세요."}
+                </div>
+              )}
             </section>
 
             {loading && (
@@ -736,8 +822,8 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
                         <div className="font-semibold">⚠️ 지금은 관련도를 판정할 수 없습니다.</div>
                         <p className="mt-1 leading-relaxed">
                           재순위·임베딩 서비스가 일시적으로 응답하지 않아, 찾은 후보가
-                          실제로 관련 있는지 확인하지 못했습니다. 근거 없는 분석을 막기 위해
-                          AI 제안·심층 분석을 생성하지 않았습니다 —
+                          실제로 관련 있는지 확인하지 못했습니다. 근거 없는 원인 단정을 막기 위해
+                          근거 기반 답변을 생성하지 않았습니다 —
                           <b> 잠시 후 다시 시도</b>하거나 아래 후보를 직접 확인하세요.
                         </p>
                       </>
@@ -745,11 +831,20 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
                       <>
                         <div className="font-semibold">⚠️ 유사한 과거 해결 사례를 찾지 못했습니다.</div>
                         <p className="mt-1 leading-relaxed">
-                          이 고장 유형은 처음 보고된 것일 수 있습니다. 근거 없는 추측을 막기 위해
-                          AI 제안·심층 분석을 생성하지 않았습니다 — <b>시니어 검토가 필요합니다.</b>
+                          이 유형의 문의는 처음일 수 있습니다. 근거 없는 추측을 막기 위해
+                          <b>원인을 담은 답변</b>은 만들지 않았습니다. 그렇다고 고객을 기다리게 둘 수는
+                          없으므로, 원인을 단정하지 않는 <b>접수 답변</b>은 아래에서 만들 수 있습니다.
                         </p>
                       </>
                     )}
+                    <div className="mt-3">
+                      <button onClick={draftAck} disabled={ackBusy}
+                        title="원인을 단정하지 않는 접수 답변을 만들어 발송 대기 큐에 넣습니다"
+                        className="inline-flex items-center rounded-lg border border-emerald-600/50 bg-emerald-500/10 px-3 py-1.5 text-xs font-medium text-emerald-300 transition hover:bg-emerald-500/20 disabled:opacity-40">
+                        {ackBusy ? "작성 중…" : "📮 접수 답변 만들기 → 발송 대기"}
+                      </button>
+                      <QNotice m={ackMsg} />
+                    </div>
                     {reco.gate && <GateDetail gate={reco.gate} />}
                     {/* 사례가 없을 때만 뜨는 조사 계획. 근본원인을 만들지 않고
                         "무엇을 재면 어떤 가설이 죽는지" 를 쓴다 — 게이트를 우회하는
@@ -802,14 +897,116 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
                   </div>
                 ) : (
                   <>
-                    {/* AI 제안 */}
-                    {reco.proposal && (
-                      <section className="rounded-xl border border-sky-900/60 bg-sky-950/20 p-5">
-                        <div className="flex items-center justify-between mb-3">
-                          <h3 className="text-sm font-semibold tracking-tight text-sky-300">🤖 AI 제안 (근거: {reco.proposal.based_on})</h3>
-                          <div className="w-40"><Bar value={reco.proposal.confidence} /></div>
+                    {/* 📮 고객 응대 답변 — 이 화면의 목적이다. 그래서 맨 위에 있고,
+                        생성 전에도 자리를 지킨다. 아래 '근거' 는 이 답변을 뒷받침하는
+                        재료이지 산출물이 아니다. */}
+                    <section className="rounded-xl border border-emerald-900/60 bg-emerald-950/10 p-5">
+                      <div className="mb-3 flex flex-wrap items-center gap-2">
+                        <span className="text-sm font-semibold text-emerald-300">📮 고객 응대 답변</span>
+                        {reco.reply_intent && (
+                          <span className="rounded-full border border-zinc-700 px-2 py-0.5 text-[11px] text-zinc-300">
+                            {reco.reply_intent}
+                          </span>
+                        )}
+                        {reco.reply_lang && reco.reply_lang !== "ko" && (
+                          <span className="rounded-full border border-sky-800 px-2 py-0.5 text-[11px] text-sky-300"
+                            title="고객이 쓴 언어로 답합니다">{reco.reply_lang.toUpperCase()}</span>
+                        )}
+                        {reco.reply_proofread?.applied && (
+                          <span className="rounded-full border border-zinc-700 px-2 py-0.5 text-[11px] text-zinc-400"
+                            title="오타·띄어쓰기를 교정했습니다. 숫자·제품명·제목이 바뀌면 교정을 버리고 원문을 씁니다">
+                            오타 교정됨
+                          </span>
+                        )}
+                        {reco.reply_proofread?.rejected && (
+                          <span className="rounded-full border border-amber-700 px-2 py-0.5 text-[11px] text-amber-300"
+                            title={`교정본이 내용을 바꿔 폐기했습니다: ${reco.reply_proofread.rejected}`}>
+                            교정 폐기
+                          </span>
+                        )}
+                        {!explaining && reco.explanation && reco.explanation_cached !== undefined && (
+                          <span title={reco.explanation_cached
+                            ? "문의와 근거 사례가 그대로여서 저장된 답변을 재사용했습니다 (LLM 호출 없음)"
+                            : "이번에 새로 생성했습니다"}
+                            className={`inline-flex items-center whitespace-nowrap rounded-full border px-2.5 py-0.5 text-[11px] font-medium ${
+                              reco.explanation_cached
+                                ? "border-emerald-900/60 bg-emerald-950/60 text-emerald-400"
+                                : "border-sky-900/60 bg-sky-950/60 text-sky-400"}`}>
+                            {reco.explanation_cached ? "저장된 답변 재사용" : "새로 생성됨"}
+                          </span>
+                        )}
+                        {reco.explanation && !explaining && (
+                          <button onClick={reExplain}
+                            title="캐시를 무시하고 지금 다시 생성합니다"
+                            className="ml-auto text-[11px] text-zinc-400 underline decoration-dotted underline-offset-2 hover:text-sky-400">
+                            다시 생성
+                          </button>
+                        )}
+                      </div>
+
+                      {!reco.explanation && !explaining ? (
+                        <div className="rounded-lg border border-dashed border-zinc-700 bg-zinc-950/40 p-6 text-center">
+                          <p className="text-sm text-zinc-400">
+                            이 문의에 보낼 답변을 아직 만들지 않았습니다.
+                          </p>
+                          <button onClick={explain}
+                            className="mt-3 inline-flex items-center rounded-lg border border-emerald-500/50 bg-emerald-500/10 px-4 py-2 text-sm font-medium text-emerald-300 transition hover:bg-emerald-500/20">
+                            ✨ 고객 응대 답변 생성
+                          </button>
+                          <p className="mt-2 text-[11px] text-zinc-500">
+                            과거 해결 사례를 근거로 쓰되, 내부 사례 번호·확정 일정 약속은 발송 전에 차단됩니다.
+                          </p>
                         </div>
-                        <div className="space-y-3 text-sm">
+                      ) : (
+                        <>
+                          <div className="prose prose-sm prose-invert max-w-none prose-headings:text-emerald-300 prose-headings:my-2 prose-p:my-1">
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>{reco.explanation || "생성 중…"}</ReactMarkdown>
+                          </div>
+
+                          {(reco.reply_policy?.violations?.length ?? 0) > 0 && (
+                            <div className="mt-3 space-y-1 border-t border-zinc-800 pt-3">
+                              {reco.reply_policy!.violations.map((v, i) => (
+                                <div key={i} className={`rounded-lg border px-2 py-1 text-[12px] ${
+                                  v.severity === "block"
+                                    ? "border-rose-700 bg-rose-500/10 text-rose-300"
+                                    : "border-amber-700 bg-amber-500/10 text-amber-300"}`}>
+                                  <span className="font-medium">{v.severity === "block" ? "차단" : "경고"}</span>
+                                  <span className="ml-2 opacity-70">{v.code}</span>
+                                  <span className="ml-2">{v.detail}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          {sel && !explaining && (
+                            <div className="mt-3 border-t border-zinc-800 pt-3">
+                              <button onClick={queueReply} disabled={queueing}
+                                title="이 답변을 발송 대기 큐에 넣습니다 (고객에게 나가는 건 승인 시에만)"
+                                className="inline-flex items-center rounded-lg border border-emerald-600/50 bg-emerald-500/10 px-4 py-2 text-sm font-medium text-emerald-300 transition hover:bg-emerald-500/20 disabled:opacity-40">
+                                {queueing ? "추가 중…"
+                                  : replyStatus?.state === "approved" ? "📮 후속 답변을 발송 대기로"
+                                  : "📮 이 답변을 발송 대기로"}
+                              </button>
+                              <QNotice m={queueMsg} />
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </section>
+
+                    {/* 근거 — 답변을 뒷받침하는 재료다. 예전에는 이게 화면의 주인공
+                        이었고(🤖 AI 제안), 고객 답변은 그 아래 부록이었다. 순서가
+                        일의 순서를 정한다. */}
+                    {reco.proposal && (
+                      <details className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-5">
+                        <summary className="cursor-pointer text-sm font-semibold text-zinc-200">
+                          🔎 근거 — 유사 사례에서 확인된 원인·조치
+                          <span className="ml-2 text-[11px] font-normal text-zinc-500">
+                            (근거 {reco.proposal.based_on} · 신뢰도 {Math.round((reco.proposal.confidence ?? 0) * 100)}%)
+                          </span>
+                        </summary>
+                        <div className="mt-3 w-40"><Bar value={reco.proposal.confidence} /></div>
+                        <div className="mt-3 space-y-3 text-sm">
                           <div><span className="font-semibold text-red-400">🔍 예상 근본원인</span>
                             <div className="mt-1 prose prose-sm prose-invert max-w-none text-zinc-300 prose-p:my-1 prose-li:my-0.5 prose-ol:my-1 prose-ul:my-1">
                               <ReactMarkdown remarkPlugins={[remarkGfm]}>{reco.proposal.root_cause || "—"}</ReactMarkdown></div></div>
@@ -820,79 +1017,17 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
                             <div className="mt-1 prose prose-sm prose-invert max-w-none text-zinc-300 prose-p:my-1 prose-li:my-0.5 prose-ol:my-1 prose-ul:my-1">
                               <ReactMarkdown remarkPlugins={[remarkGfm]}>{reco.proposal.workaround || "—"}</ReactMarkdown></div></div>
                         </div>
-                        <div className="mt-4 flex items-center gap-2 flex-wrap">
-                          <button onClick={explain} disabled={explaining}
-                            className="inline-flex items-center rounded-lg border border-sky-500/50 bg-sky-500/10 px-4 py-2 text-sm font-medium text-sky-300 transition hover:bg-sky-500/20 disabled:opacity-40">
-                            {explaining ? "AI 심층 분석 생성 중…" : "✨ AI 심층 분석 (LLM)"}
-                          </button>
-                          {sel && sel.status !== "완료" && (
+                        {sel && sel.status !== "완료" && (
+                          <div className="mt-4">
                             <button onClick={draftRca} disabled={drafting}
-                              title="RCA 댓글 초안을 만들어 승인 대기 큐에 추가 (게시는 승인 시에만)"
+                              title="엔지니어가 읽을 RCA 댓글 초안을 만들어 승인 대기 큐에 추가 (게시는 승인 시에만)"
                               className="inline-flex items-center rounded-lg border border-zinc-600 px-4 py-2 text-sm font-medium text-zinc-200 transition hover:bg-zinc-800 disabled:opacity-40">
-                              {drafting ? "초안 생성 중…" : "🤖 RCA 댓글 초안 → 승인 대기"}
+                              {drafting ? "초안 생성 중…" : "🤖 RCA 댓글 초안 (엔지니어용) → 승인 대기"}
                             </button>
-                          )}
-                        </div>
-                        <QNotice m={draftMsg} />
-                      </section>
-                    )}
-
-                    {/* LLM 설명 (agno 구조화 출력) */}
-                    {reco.explanation && (
-                      <section className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-5">
-                        {!explaining && (
-                          <div className="mb-3 flex items-center gap-2">
-                            {reco.explanation_cached !== undefined && (
-                              <span title={reco.explanation_cached
-                                ? "이슈와 근거 사례가 그대로여서 저장된 분석을 재사용했습니다 (LLM 호출 없음)"
-                                : "이번에 새로 생성했습니다"}
-                                className={`inline-flex items-center whitespace-nowrap rounded-full border px-2.5 py-0.5 text-[11px] font-medium ${
-                                  reco.explanation_cached
-                                    ? "border-emerald-900/60 bg-emerald-950/60 text-emerald-400"
-                                    : "border-sky-900/60 bg-sky-950/60 text-sky-400"}`}>
-                                {reco.explanation_cached ? "저장된 분석 재사용" : "새로 생성됨"}
-                              </span>
-                            )}
-                            <button onClick={reExplain}
-                              title="캐시를 무시하고 지금 다시 생성합니다"
-                              className="ml-auto text-[11px] text-zinc-400 underline decoration-dotted underline-offset-2 hover:text-sky-400">
-                              다시 생성
-                            </button>
+                            <QNotice m={draftMsg} />
                           </div>
                         )}
-                        <div className="prose prose-sm prose-invert max-w-none prose-headings:text-sky-300 prose-headings:my-2 prose-p:my-1">
-                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{reco.explanation}</ReactMarkdown>
-                        </div>
-                        {reco.explanation_citations && reco.explanation_citations.length > 0 && (
-                          <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-zinc-800 pt-3">
-                            <span className="text-[11px] text-zinc-400">📎 근거(검증됨):</span>
-                            {reco.explanation_citations.map((k) => (
-                              <button key={k} onClick={() => goKey(k)}
-                                className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-0.5 font-mono text-[11px] text-sky-400 hover:border-sky-600">{k}</button>
-                            ))}
-                          </div>
-                        )}
-                        {reco.explanation_dropped_citations && reco.explanation_dropped_citations.length > 0 && (
-                          // "제거됨" 은 거짓이었다 — 본문은 그대로였고 아무것도 지워지지
-                          // 않았다. 사용자는 그 말을 믿고 본문의 사례 번호를 찾으러 간다.
-                          // 이제 본문에도 (미제공) 이 붙고, 여기서는 무엇을 믿지 말아야
-                          // 하는지만 알린다.
-                          <div className="mt-1.5 text-[11px] text-red-400">
-                            ⚠ 본문이 근거에 없는 사례를 언급했습니다: {reco.explanation_dropped_citations.join(", ")}
-                            {" "}— 본문에 <b>(미제공)</b> 으로 표시했습니다. 이 번호는 신뢰하지 마세요.
-                          </div>
-                        )}
-                        {sel && sel.status !== "완료" && !explaining && (
-                          <div className="mt-3 border-t border-zinc-800 pt-3">
-                            <button onClick={draftFromAnalysis} disabled={draftingAn}
-                              title="이 심층 분석을 RCA 댓글로 승인 대기 큐에 추가 (사람 승인 후에만 Jira 게시)"
-                              className="inline-flex items-center rounded-lg border border-zinc-600 px-4 py-2 text-sm font-medium text-zinc-200 transition hover:bg-zinc-800 disabled:opacity-40">
-                              {draftingAn ? "추가 중…" : "📤 이 심층 분석을 RCA 댓글로 → 승인 대기"}
-                            </button>
-                            <QNotice m={draftAnMsg} />
-                          </div>
-                        )}
-                      </section>
+                      </details>
                     )}
 
                     {/* 유사 사례 */}
