@@ -37,8 +37,33 @@ if ! "$HERMES" profile list 2>/dev/null | grep -qE "(^|[^a-z-])$PROFILE([^a-z-]|
   echo "프로파일 $PROFILE 생성"
   hermes profile create "$PROFILE" --clone-from lsi \
     --description "VOC 대응 에이전트 — 자기개선 loop 주기 실행" >/dev/null
+
+  # 클론은 **충돌하는 것까지 복사한다.** 그대로 두면 게이트웨이가 뜨자마자 죽는다:
+  #   · Telegram 봇 토큰이 같아 두 게이트웨이가 같은 봇을 폴링 → Conflict →
+  #     "No connected messaging platforms remain" 으로 종료(실측).
+  #   · api_server 포트가 같아 바인드 실패.
+  # 이 프로파일은 메시징이 아니라 **cron 스케줄러**가 목적이므로 Telegram 은 끈다.
+  CFG="$HOME/.hermes/profiles/$PROFILE/config.yaml"
+  ENVF="$HOME/.hermes/profiles/$PROFILE/.env"
+  PORT=8643
+  while lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; do PORT=$((PORT+1)); done
+  python3 - "$CFG" "$ENVF" "$PORT" <<'PYFIX'
+import re, sys, pathlib
+cfg, envf, port = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+s = cfg.read_text()
+s = re.sub(r'(platforms:\n(?:.*\n)*?  telegram:\n    enabled: )true', r'\1false', s, count=1)
+s = re.sub(r'(platforms:\n(?:.*\n)*?      port: )\d+', r'\g<1>' + port, s, count=1)
+cfg.write_text(s)
+if envf.exists():
+    e = envf.read_text()
+    e = re.sub(r'^TELEGRAM_BOT_TOKEN=.*$', 'TELEGRAM_BOT_TOKEN=', e, count=1, flags=re.M)
+    envf.write_text(e)
+print(f"  Telegram 비활성 · api_server 포트 {port}")
+PYFIX
+
   "$HERMES" gateway install >/dev/null 2>&1 || true
   "$HERMES" gateway start   >/dev/null 2>&1 || true
+  sleep 5
 fi
 [ -n "$PROFILE" ] || { echo "hermes 프로파일을 알 수 없습니다. HERMES_PROFILE 을 지정하세요." >&2; exit 1; }
 # 래퍼(예: `lsi` = `hermes -p lsi`)는 이미 프로파일을 고정한다. 거기에 -p 를 또 붙이면

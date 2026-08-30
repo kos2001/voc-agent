@@ -34,6 +34,14 @@ hermes -p <프로파일> cron rm voc-selfimprove-weekly
 
 다른 프로파일에 두려면 `HERMES_PROFILE=<이름> bash scripts/setup_self_improve_cron.sh`.
 
+**프로파일 클론은 충돌하는 것까지 복사한다.** 새로 만들 때 스크립트가 두 가지를
+중화한다 — 안 하면 게이트웨이가 뜨자마자 죽는다(실측).
+
+- **Telegram 봇 토큰이 같다** → 두 게이트웨이가 같은 봇을 폴링해 Conflict 가 나고,
+  "No connected messaging platforms remain" 으로 **종료**된다. 이 프로파일은 메시징이
+  아니라 cron 스케줄러가 목적이므로 Telegram 을 끄고 토큰을 비운다.
+- **api_server 포트가 같다** → 바인드 실패. 비어 있는 포트를 찾아 넣는다.
+
 ## 왜 launchd 에서 옮겼나
 
 plist 에 저장소 **절대경로**가 박혀 있었다. `lsi_error_analyzer` → `voc-agent` 리네임
