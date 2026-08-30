@@ -101,6 +101,170 @@ INTENTS: dict[str, dict] = {
 _PRIORITY = ("rma_request", "complaint", "workaround_request", "status_inquiry",
              "defect_report", "spec_inquiry", "howto", "other")
 
+# ── 프로파일 ────────────────────────────────────────────────────────────────
+# 같은 파이프라인으로 두 종류의 VOC 를 대응한다.
+#
+#   external  외부 고객사 문의 — 반도체 부품 기술지원
+#   internal  **사내 VOC** — 사내 SW 서비스를 쓰는 동료·팀의 요청에 담당 엔지니어가 답한다
+#
+# 왜 프로파일인가: 둘은 문체만 다른 게 아니라 **정책이 정반대인 지점**이 있다.
+#
+#   · 내부 이슈 키(LSI-7) — 외부에는 절대 나가면 안 되고, 사내에서는 **있어야** 한다.
+#     "LSI-7 에서 추적 중입니다" 가 사내에서는 가장 유용한 문장이다.
+#   · 환불·보상 확약 — 외부에서는 차단, 사내에서는 애초에 없는 개념이다.
+#   · 확정 일정 약속 — 외부에서는 차단, 사내에서는 "다음 스프린트에 배포합니다" 가
+#     정상 업무다. 차단하면 엔지니어가 검사를 통째로 무시하게 된다(경고로 내린다).
+#   · 전문 용어 — 외부에서는 경고, 사내에서는 정상이다.
+#   · 대신 사내에서 진짜 위험한 것은 **자격증명·비밀 유출**이다. 그건 양쪽 다 차단한다.
+#
+# 파이프라인을 복제하지 않는 이유는 늘 같다 — 두 벌이 되면 한쪽만 갱신되고 갈라진다.
+# 갈라진 규칙은 없는 규칙과 같다.
+
+INTERNAL_INTENTS: dict[str, dict] = {
+    "outage": {
+        "label": "장애·서비스 중단",
+        "goal": "지금 상태·영향 범위·우회 수단·복구 진행",
+        "sections": ("현재 상태", "영향 범위", "지금 쓸 수 있는 우회", "복구 진행과 다음 공지"),
+        "keywords": ("장애", "다운", "중단", "안 열려", "접속이 안", "504", "503", "500",
+                     "타임아웃", "전체", "모두 안", "긴급", "블로커"),
+    },
+    "bug_report": {
+        "label": "오류·버그 신고",
+        "goal": "재현 여부·원인·조치·언제 반영되는지",
+        "sections": ("확인한 내용", "원인", "지금 할 수 있는 조치", "수정 반영 계획",
+                     "추가로 필요한 정보"),
+        "keywords": ("오류", "에러", "버그", "안 됩니다", "안돼", "실패", "exception",
+                     "stack", "재현", "이상", "깨집니다", "빠집니다", "누락"),
+    },
+    "access_request": {
+        "label": "권한·계정·환경 요청",
+        "goal": "처리 절차와 필요한 정보. 승인 주체를 분명히",
+        "sections": ("요청 내용", "필요한 정보·승인", "처리 절차", "다음 단계"),
+        "keywords": ("권한", "계정", "접근", "액세스", "토큰 발급", "가입", "초대",
+                     "role", "승인", "환경 요청", "vpn"),
+    },
+    "data_request": {
+        "label": "데이터·리포트 요청",
+        "goal": "무엇을 언제 어떤 형태로 줄 수 있는지",
+        "sections": ("요청 내용", "제공 가능 범위", "전달 방법·시점", "다음 단계"),
+        "keywords": ("데이터", "리포트", "추출", "덤프", "쿼리", "통계", "csv", "집계"),
+    },
+    "feature_request": {
+        "label": "기능 요청·개선 제안",
+        "goal": "수용 여부와 근거, 대안, 백로그 처리",
+        "sections": ("요청 내용", "현재 가능한 방법", "반영 여부와 근거", "다음 단계"),
+        "keywords": ("추가해", "기능 요청", "개선", "됐으면", "지원해 주", "제안",
+                     "있으면 좋겠", "한도", "쿼터", "quota", "상향", "올려주", "늘려",
+                     "확대", "해제해"),
+    },
+    "perf_issue": {
+        "label": "성능 저하",
+        "goal": "어디가 느린지·측정값·조치",
+        "sections": ("확인한 내용", "측정·원인", "지금 할 수 있는 조치", "개선 계획"),
+        "keywords": ("느립니다", "느려", "지연", "latency", "타임", "오래 걸", "버벅",
+                     "응답이 없", "무겁"),
+    },
+    "howto": {
+        "label": "사용법·설정 문의",
+        "goal": "요청한 동작을 수행하는 절차",
+        "sections": ("문의 내용", "설정 방법", "확인 방법", "추가 문의"),
+        "keywords": ("어떻게", "방법", "설정", "사용법", "하려면", "가능한가요",
+                     "지원하나요", "쓸 수 있나요", "문서"),
+    },
+    "status_inquiry": {
+        "label": "진행 상황·일정 문의",
+        "goal": "어디까지 왔고 다음이 언제인지",
+        "sections": ("문의 내용", "현재 진행 상황", "다음 공유 시점", "그동안의 우회"),
+        "keywords": ("언제", "진행 상황", "진행상황", "일정", "머지", "배포 예정",
+                     "아직인가", "리뷰", "기다리"),
+    },
+    "other": {
+        "label": "기타 요청",
+        "goal": "요청 사항에 대한 직접적인 답",
+        "sections": ("문의 내용", "안내", "다음 단계"),
+        "keywords": (),
+    },
+}
+
+# 사내 우선순위: 지금 일을 막고 있는 것부터. 장애 > 권한(막힘) > 성능 > 버그 > 일정 > 나머지.
+_INTERNAL_PRIORITY = ("outage", "access_request", "perf_issue", "bug_report",
+                      "status_inquiry", "data_request", "feature_request", "howto", "other")
+
+_INTERNAL_RULES_KO = (
+    "작성 규칙 (사내 동료가 읽는 글입니다):\n"
+    "- 존댓말로 쓰되 **간결하게** 씁니다. 과한 사과·인사말을 넣지 마세요.\n"
+    "- 관련 이슈 키(예: LSI-7)를 **적극적으로** 인용하세요 — 사내에서는 추적 가능한 "
+    "번호가 가장 유용한 정보입니다.\n"
+    "- 기술 용어를 그대로 씁니다. 풀어 쓰느라 부정확해지지 마세요.\n"
+    "- **자격증명·토큰·비밀번호·비공개 접속 정보를 본문에 쓰지 마세요.** 필요하면 "
+    "'별도 채널로 전달' 이라고만 씁니다.\n"
+    "- 한자/CJK 한자 금지.\n"
+    "- 일정은 **확정과 예상을 구분**해서 씁니다(예: '다음 스프린트 목표', '확정 아님').\n"
+    "- 확인되지 않은 원인은 단정하지 말고 '가능성이 높습니다' 처럼 씁니다.\n"
+    "- 요청자가 **바로 할 수 있는 것**을 먼저 쓰고, 우리 쪽 진행은 그다음에 씁니다.\n"
+    "- 마지막에 다음 단계(누가 무엇을 언제)를 반드시 넣습니다.\n"
+    "- 500자 내외. 배경 설명보다 조치와 상태를 씁니다.\n")
+
+_INTERNAL_RULES_EN = (
+    "Writing rules (an internal colleague reads this):\n"
+    "- Polite but **concise**. No excessive apologies or pleasantries.\n"
+    "- **Cite issue keys** (e.g. LSI-7) — internally, a traceable number is the most "
+    "useful thing you can give.\n"
+    "- Keep technical terms as they are; do not lose precision by simplifying.\n"
+    "- **Never put credentials, tokens, passwords or private endpoints in the text.** "
+    "Say 'shared separately' instead.\n"
+    "- Separate committed dates from estimates ('target for next sprint, not committed').\n"
+    "- Do not state an unconfirmed cause as fact.\n"
+    "- Put what the requester can do right now first; our own progress second.\n"
+    "- End with a next step (who does what, by when).\n"
+    "- About 300 words. Prefer state and actions over background.\n")
+
+PROFILES: dict[str, dict] = {
+    "external": {
+        "label": "외부 고객 응대",
+        "persona_ko": "당신은 반도체 부품 고객사를 응대하는 기술지원 담당자입니다.",
+        "persona_en": ("You are a technical support engineer replying to a semiconductor "
+                       "component customer."),
+        "audience_ko": "고객에게 그대로 보낼 답변",
+        "redact_keys": True,        # 내부 이슈 키를 지운다
+        "severity": {},             # 기본 심각도 그대로
+    },
+    "internal": {
+        "label": "사내 VOC 대응",
+        "persona_ko": ("당신은 사내 서비스를 운영하는 SW 엔지니어입니다. 그 서비스를 쓰는 "
+                       "사내 동료·팀의 요청에 답합니다."),
+        "persona_en": ("You are a software engineer running an internal service, replying "
+                       "to a colleague or team who uses it."),
+        "audience_ko": "요청자(사내 동료)에게 그대로 보낼 답변",
+        "intents": INTERNAL_INTENTS,
+        "priority": _INTERNAL_PRIORITY,
+        "rules_ko": _INTERNAL_RULES_KO,
+        "rules_en": _INTERNAL_RULES_EN,
+        "redact_keys": False,       # 사내에서는 이슈 키가 **있어야** 한다
+        "severity": {
+            "internal_key": "off",          # 사내에서는 정상 — 오히려 권장한다
+            "internal_jargon": "off",       # 전문 용어가 정상이다
+            "compensation_promise": "off",  # 사내에 없는 개념
+            "date_promise": "warn",         # 커밋먼트는 정상 업무 — 다만 눈에 띄게 둔다
+            "plain_speech": "warn",         # 개조식이 흔하다
+            "third_party": "warn",          # 타 조직 정보는 조심하되 차단까지는 아니다
+        },
+    },
+}
+
+DEFAULT_PROFILE = "external"
+
+
+def profile(name: str = "") -> dict:
+    """프로파일 조회. 알 수 없는 이름은 기본값으로 접는다 — 오타 하나로 규칙이
+    통째로 사라지는 것보다, 기본 규칙으로 도는 편이 안전하다."""
+    return PROFILES.get((name or DEFAULT_PROFILE).strip().lower(), PROFILES[DEFAULT_PROFILE])
+
+
+def intents_of(prof: str = "") -> dict:
+    return profile(prof).get("intents") or INTENTS
+
+
 # 요청 신호: 물음표, 또는 요청·질의형 어미. 문장 단위로 판정한다 — 한 덩어리로 정규식을
 # 돌리면 "왜 그런가요? 방법을 알려주세요." 가 한 문장으로 붙어 요청 2건이 1건이 된다.
 _ASK_RE = re.compile(
@@ -198,24 +362,31 @@ def unanswered_asks(asks, body: str, *, min_hits: int = 1) -> list[str]:
     return out
 
 
-def classify(text: str) -> dict:
+def classify(text: str, prof: str = "") -> dict:
     """요청 유형 분류. 규칙 기반 — LLM 없이 항상 답이 나와야 하는 자리다.
 
-    반환: {intent, label, goal, sections, matched, scores, asks}
+    유형 체계는 프로파일이 정한다 — 사내 VOC 에 '환불 요청' 은 없고, 외부 고객 문의에
+    '권한 요청' 은 없다. 없는 유형을 억지로 맞추면 답의 골격이 통째로 틀어진다.
+
+    반환: {intent, label, goal, sections, matched, scores, asks, profile}
     """
     t = (text or "")
+    pf = profile(prof)
+    intents = pf.get("intents") or INTENTS
+    order = pf.get("priority") or _PRIORITY
     scores = {name: sum(1 for kw in spec["keywords"] if kw in t)
-              for name, spec in INTENTS.items()}
-    best = max(_PRIORITY, key=lambda n: (scores.get(n, 0) > 0, -_PRIORITY.index(n)))
+              for name, spec in intents.items()}
+    best = max(order, key=lambda n: (scores.get(n, 0) > 0, -order.index(n)))
     if scores.get(best, 0) == 0:
         best = "other"
-    spec = INTENTS[best]
+    spec = intents[best]
     return {
         "intent": best, "label": spec["label"], "goal": spec["goal"],
         "sections": list(spec["sections"]),
         "matched": [kw for kw in spec["keywords"] if kw in t],
         "scores": {k: v for k, v in scores.items() if v},
         "asks": extract_asks(t),
+        "profile": pf["label"],
     }
 
 
@@ -287,33 +458,57 @@ _STYLE_RULES_EN = (
     "- About 350 words, 3-5 paragraphs. No long background essays.\n")
 
 
-def _evidence_block(matches: list[dict], proposal: dict | None) -> str:
+def scrub(text: str, forbidden=()) -> str:
+    """근거 텍스트에서 **고객에게 보여선 안 되는 고유명사**를 지운다.
+
+    근거 사례의 제목에는 다른 고객사 이름이 들어 있다(Jira 미러의 요약이
+    "[DDI-OLED-T7] ... (Helios Automotive / MIPI DSI v1.2 host)" 형태다).
+    정책이 출력에서 막긴 하지만, 애초에 **보여주지 않는 것이 규칙으로 막는 것보다
+    확실하다** — 이슈 키에 대해 이미 같은 결론을 냈다.
+    """
+    out = str(text or "")
+    for name in forbidden or ():
+        if name:
+            out = out.replace(name, "다른 고객사")
+    return out
+
+
+def _evidence_block(matches: list[dict], proposal: dict | None, forbidden=()) -> str:
     """근거를 **번호 없이** 내부용 재료로 정리 — 프롬프트에도 키를 넣지 않는다.
 
     프롬프트에 키가 들어가면 모델은 높은 확률로 그걸 본문에 인용한다(실측). 애초에
-    보여주지 않는 것이 규칙으로 막는 것보다 확실하다.
+    보여주지 않는 것이 규칙으로 막는 것보다 확실하다. 다른 고객사 이름도 같다.
     """
+    def clean(v):
+        return scrub(redact(str(v or "")), forbidden)
+
     lines = []
     for i, m in enumerate(matches[:3], 1):
-        lines.append(f"[유사 사례 {i}] 증상: {m.get('summary', '')}\n"
-                     f"  원인: {m.get('root_cause', '') or '—'}\n"
-                     f"  조치: {m.get('resolution', '') or '—'}\n"
-                     f"  우회책: {m.get('workaround', '') or '—'}")
+        lines.append(f"[유사 사례 {i}] 증상: {clean(m.get('summary'))}\n"
+                     f"  원인: {clean(m.get('root_cause')) or '—'}\n"
+                     f"  조치: {clean(m.get('resolution')) or '—'}\n"
+                     f"  우회책: {clean(m.get('workaround')) or '—'}")
     p = proposal or {}
     if p:
-        lines.append(f"[종합 제안] 원인: {p.get('root_cause', '') or '—'} / "
-                     f"조치: {p.get('resolution', '') or '—'} / "
-                     f"우회책: {p.get('workaround', '') or '—'}")
+        lines.append(f"[종합 제안] 원인: {clean(p.get('root_cause')) or '—'} / "
+                     f"조치: {clean(p.get('resolution')) or '—'} / "
+                     f"우회책: {clean(p.get('workaround')) or '—'}")
     return "\n".join(lines) if lines else "(확인된 유사 사례 없음 — 원인을 단정하지 말 것)"
 
 
 def reply_prompt(rec: dict, matches: list[dict], proposal: dict | None,
-                 intent: dict, *, guidance: str = "", lang: str = "ko") -> str:
+                 intent: dict, *, guidance: str = "", lang: str = "ko",
+                 forbidden=(), canonical: str = "", prof: str = "") -> str:
     """고객 답변 생성 프롬프트. 유형별 골격 + 요청 문장 + 근거(키 제거) + 문체 규칙.
 
     lang="en" 이면 답변 언어만 바꾼다 — 골격·근거·규칙은 같다. 규칙을 언어별로
     따로 관리하면 한쪽만 갱신되어 영어 답변에서 약속 금지 규칙이 빠지는 식으로 갈라진다.
+
+    canonical — 같은 유형에 **이미 검토·발송한 정본 답변**. 같은 문의가 반복되면
+    답변도 같아야 한다. 매번 새로 지어내면 고객사마다 다른 말을 듣게 되고, 사람이
+    고쳐 놓은 표현이 다음 답변에 남지 않는다.
     """
+    pf = profile(prof)
     asks = intent.get("asks") or []
     if lang == "en":
         ask_block = ("\n".join(f"- {a}" for a in asks) if asks
@@ -326,28 +521,33 @@ def reply_prompt(rec: dict, matches: list[dict], proposal: dict | None,
             f"Request type: {intent.get('label', '')} — {intent.get('goal', '')}\n\n"
             "## The customer's requests — every one must be answered\n" + ask_block + "\n\n"
             "## Required structure (this order; translate these headings into English)\n"
-            + sections + "\n\n" + _STYLE_RULES_EN + "\n"
+            + sections + "\n\n" + (pf.get("rules_en") or _STYLE_RULES_EN) + "\n"
             f"## Customer inquiry\n{rec.get('summary', '')}\n{rec.get('symptom', '')}\n"
             + (f"What they asked for: {rec.get('customer_ask', '')}\n" if rec.get("customer_ask") else "")
             + "\n## Reference material (internal, in Korean. Ground the reply in it, but "
               "rewrite it in the customer's words — never paste it)\n"
-            + _evidence_block(matches, proposal)
+            + _evidence_block(matches, proposal, forbidden)
+            + (f"\n\n## An approved reply already sent for this same issue type — "
+               f"follow its content and tone; do not contradict it\n{canonical}" if canonical else "")
             + (f"\n\n## Repeatedly raised in past reviews\n{guidance}" if guidance else ""))
     ask_block = ("\n".join(f"- {a}" for a in asks) if asks
                  else "- (명시적 질문 없음 — 접수 사실과 진행 계획을 안내)")
     sections = "\n".join(f"### {s}" for s in intent.get("sections", []))
     return (
-        "당신은 반도체 부품 고객사를 응대하는 기술지원 담당자입니다. 아래 고객 문의에 "
-        "**고객에게 그대로 보낼 답변**을 한국어 마크다운으로 작성하세요.\n\n"
+        pf["persona_ko"] + f" 아래 요청에 **{pf['audience_ko']}**을 "
+        "한국어 마크다운으로 작성하세요.\n\n"
         f"이 문의의 유형: {intent.get('label', '')} — {intent.get('goal', '')}\n\n"
         "## 반드시 답해야 할 고객의 요청\n" + ask_block + "\n\n"
         "## 답변 골격 (이 순서, 이 제목 그대로)\n" + sections + "\n\n"
-        + _STYLE_RULES + "\n"
+        + (pf.get("rules_ko") or _STYLE_RULES) + "\n"
         f"## 고객 문의\n{rec.get('summary', '')}\n{rec.get('symptom', '')}\n"
         + (f"고객이 요청한 것: {rec.get('customer_ask', '')}\n" if rec.get("customer_ask") else "")
         + "\n"
         "## 참고 자료 (내부 자료입니다. 이 내용을 근거로 삼되 그대로 옮기지 말고 "
-        "고객이 이해할 말로 바꿔 쓰세요)\n" + _evidence_block(matches, proposal)
+        "고객이 이해할 말로 바꿔 쓰세요)\n" + _evidence_block(matches, proposal, forbidden)
+        + (f"\n\n## 같은 유형에 이미 검토·발송한 정본 답변 (내용·표현을 따르고 "
+           f"모순되게 쓰지 마세요. 이 문의의 사실관계에 맞게만 조정합니다)\n{canonical}"
+           if canonical else "")
         + (f"\n\n## 과거 검토에서 반복 지적된 사항\n{guidance}" if guidance else ""))
 
 
@@ -391,21 +591,26 @@ def render_reply(rec: dict, matches: list[dict], proposal: dict | None,
     parts = [f"안녕하세요, 문의 주신 내용 확인했습니다."]
     for sec in intent.get("sections", []):
         parts.append(f"\n### {sec}")
-        if sec in ("문의 주신 사항", "확인한 내용", "불편을 드린 점에 대해"):
+        if sec in ("문의 주신 사항", "확인한 내용", "불편을 드린 점에 대해",
+                   "문의 내용", "요청 내용", "현재 상태"):
             if sec == "불편을 드린 점에 대해":
                 parts.append("불편을 드려 죄송합니다. 말씀해 주신 내용을 확인했습니다.")
             asks = intent.get("asks") or []
             parts.append("말씀해 주신 내용: " + (rec.get("summary", "") or "").strip())
             if asks:
                 parts.append("요청하신 사항: " + " / ".join(asks))
-        elif sec in ("현재 파악된 원인", "확인한 사실"):
+        elif sec in ("현재 파악된 원인", "확인한 사실", "원인", "측정·원인"):
             parts.append(_cause_sentence(p.get("root_cause", "")) if has else _NO_EVIDENCE)
         elif sec in ("지금 적용해 보실 수 있는 조치", "지금 바로 적용 가능한 방법",
-                     "그동안 도움이 되는 방법", "설정 방법"):
+                     "그동안 도움이 되는 방법", "설정 방법", "지금 할 수 있는 조치",
+                     "지금 쓸 수 있는 우회", "현재 가능한 방법", "제공 가능 범위",
+                     "그동안의 우회"):
             parts.append(_action_sentence(p.get("workaround") or p.get("resolution", "")) if has
                          else "현재 안내드릴 수 있는 임시 조치가 확인되지 않았습니다. "
                               "확인되는 대로 우선 안내드리겠습니다.")
-        elif sec in ("앞으로의 진행", "취한 조치", "근본 조치 진행", "현재 진행 상황"):
+        elif sec in ("앞으로의 진행", "취한 조치", "근본 조치 진행", "현재 진행 상황",
+                     "수정 반영 계획", "복구 진행과 다음 공지", "개선 계획",
+                     "반영 여부와 근거", "처리 절차", "안내"):
             parts.append("담당 엔지니어가 원인 확인을 진행하고 있으며, 확인되는 대로 "
                          "결과를 안내드리겠습니다.")
         elif sec == "처리 절차 안내":
@@ -413,11 +618,13 @@ def render_reply(rec: dict, matches: list[dict], proposal: dict | None,
             # 승인 여부는 어디에서도 암시하지 않는다.
             parts.append("교환·환불 등 처리 여부는 담당 부서에서 제품 확인 후 결정됩니다. "
                          "제품 정보와 구매 정보를 함께 보내주시면 담당 부서로 전달드리겠습니다.")
-        elif sec in ("다음 안내 시점", "다음 단계", "추가 문의"):
+        elif sec in ("다음 안내 시점", "다음 단계", "추가 문의", "다음 공유 시점",
+                     "전달 방법·시점"):
             parts.append("추가로 확인되는 내용이 있으면 이 문의에 이어서 안내드리겠습니다. "
                          "궁금하신 점은 언제든 회신해 주세요.")
         elif sec in ("추가로 알려주시면 도움이 되는 정보", "확인이 필요한 사항",
-                     "확인이 필요한 조건", "정상 동작 확인 방법"):
+                     "확인이 필요한 조건", "정상 동작 확인 방법", "추가로 필요한 정보",
+                     "필요한 정보·승인", "영향 범위", "확인 방법", "적용 시 유의사항"):
             parts.append("증상이 나타나는 상황(사용 환경·재현 조건·발생 시각)을 알려주시면 "
                          "원인 확인이 빨라집니다.")
         else:
@@ -450,11 +657,15 @@ def _cause_sentence(text: str) -> str:
 
 
 def _action_sentence(text: str) -> str:
-    """조치 문장 — 시켜야 할 일이므로 명사구를 그대로 두고 안내형으로 감싼다."""
+    """조치 문장 — 내부 서술을 **인용부호 안에** 두고 안내형으로 감싼다.
+
+    따옴표 없이 문장 끝에 붙이면 내부 서술의 개조식 종결("…있다.")이 그대로 답변의
+    문장 끝이 되어 존댓말 검사에 걸린다. 사내 목 데이터에서 20건 중 11건이 그랬다.
+    """
     s = _clean(text)
     if not s:
         return "현재 안내드릴 수 있는 조치가 확인되지 않았습니다."
-    return f"유사한 사례에서는 다음 방법이 도움이 되었습니다 — {s}."
+    return f"유사한 사례에서는 다음 방법이 도움이 되었습니다: '{s}'."
 
 
 # ── 교정(proofread) ─────────────────────────────────────────────────────────
@@ -543,6 +754,21 @@ _JARGON = ("지식베이스", "임베딩", "인용", "RCA", "coverage", "BM25", 
 # 3회 이상 반복, 문장 부호 앞 공백. 진짜 오타("콘트볼러")는 여기서 못 잡는다.
 # 못 잡는 것을 잡는 척하지 않는다 — LLM 교정이 그 몫이고, 이건 그것이 꺼져 있을 때의
 # 최소한이다.
+# 자격증명·비밀 유출. 외부로 나가면 사고이고, **사내에서도** 채팅·티켓에 토큰을
+# 붙여넣는 것이 가장 흔한 유출 경로다. 그래서 프로파일과 무관하게 차단한다.
+# 값 자체는 위반 내용에 싣지 않는다 — 검사 결과를 로그·화면에 남기면서 비밀을
+# 한 번 더 복사하는 꼴이 된다.
+_SECRET_RES = (
+    ("AWS 액세스 키", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("GitHub 토큰", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b")),
+    ("Slack 토큰", re.compile(r"\bxox[abposr]-[A-Za-z0-9-]{10,}\b")),
+    ("OpenAI/서비스 키", re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b")),
+    ("Bearer 토큰", re.compile(r"(?i)authorization\s*:\s*bearer\s+\S{10,}")),
+    ("개인 키", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("비밀번호 평문", re.compile(r"(?i)\b(?:password|passwd|비밀번호|암호)\s*[:=]\s*\S{4,}")),
+    ("접속 문자열", re.compile(r"(?i)\b\w+://[^\s/@]+:[^\s/@]+@")),
+)
+
 _JAMO_RE = re.compile(r"(?<![가-힣])[ㄱ-ㅎㅏ-ㅣ]+")
 _REPEAT_RE = re.compile(r"(.)\1{3,}")
 _SPACE_PUNCT_RE = re.compile(r"\s+[.,!?)]")
@@ -568,8 +794,16 @@ _COMPENSATE_YES_EN_RE = re.compile(
     r"is approved|has been approved)\b", re.I)
 
 
-BLOCKING = ("internal_key", "han_char", "date_promise", "compensation_promise",
-            "plain_speech", "third_party", "wrong_language")
+BLOCKING = ("secret_leak", "internal_key", "han_char", "date_promise",
+            "compensation_promise", "plain_speech", "third_party", "wrong_language")
+
+
+def blocking_for(prof: str = "") -> list[str]:
+    """이 프로파일에서 실제로 **발송을 막는** 코드. 화면이 하드코딩하면 갈라진다."""
+    sev = profile(prof).get("severity") or {}
+    out = [c for c in BLOCKING if sev.get(c, "block") == "block"]
+    out += [c for c, s in sev.items() if s == "block" and c not in out]
+    return out
 
 
 def _sentences(text: str) -> list[str]:
@@ -596,8 +830,13 @@ def _sentence_hit(text: str, a: re.Pattern, b: re.Pattern) -> str:
 
 
 def check(text: str, *, has_evidence: bool = True, forbidden: tuple = (),
-          lang: str = "ko", asks=()) -> dict:
+          lang: str = "ko", asks=(), prof: str = "") -> dict:
     """발송 전 정책 검사. 반환: {ok, blocked, violations:[{code,severity,detail}]}
+
+    prof — 프로파일. 심각도가 여기서 갈린다: 사내 VOC 는 이슈 키가 정상이고
+    (오히려 필요하다), 환불 확약은 개념 자체가 없으며, 확정 일정은 정상 업무라
+    경고로 내린다. 규칙을 지우는 게 아니라 **심각도만** 바꾼다 — 지우면 프로파일을
+    바꿨을 때 무엇이 사라졌는지 알 수 없다.
 
     forbidden — 이 답변에 **나오면 안 되는 고유명사**(다른 고객사명 등). 근거 사례의
     본문은 다른 고객의 고장 이력이다. "다른 고객사 ○○ 에서도 같은 문제가" 는 사실이어도
@@ -608,6 +847,9 @@ def check(text: str, *, has_evidence: bool = True, forbidden: tuple = (),
     def add(code: str, severity: str, detail: str) -> None:
         v.append({"code": code, "severity": severity, "detail": detail})
 
+    found_secrets = [label for label, rx in _SECRET_RES if rx.search(text or "")]
+    if found_secrets:
+        add("secret_leak", "block", f"자격증명·비밀로 보이는 값: {', '.join(found_secrets)}")
     keys = sorted(issue_keys.find_set(text))
     if keys:
         add("internal_key", "block", f"내부 이슈 키 노출: {', '.join(keys[:5])}")
@@ -659,10 +901,20 @@ def check(text: str, *, has_evidence: bool = True, forbidden: tuple = (),
     if (text or "").strip() and detect_lang(text) != lang:
         add("wrong_language", "block",
             f"고객은 {lang} 로 문의했는데 답변 언어가 다릅니다")
+    # 프로파일 심각도 적용. "off" 는 그 프로파일에서 위반이 아니라는 뜻이다.
+    sev = profile(prof).get("severity") or {}
+    v = [dict(x, severity=sev.get(x["code"], x["severity"]))
+         for x in v if sev.get(x["code"]) != "off"]
     blocked = any(x["severity"] == "block" for x in v)
     return {"ok": not v, "blocked": blocked, "violations": v}
 
 
-def redact(text: str) -> str:
-    """내부 이슈 키를 고객이 읽어도 되는 표현으로 치환. 발송 전 마지막 안전망."""
+def redact(text: str, prof: str = "") -> str:
+    """내부 이슈 키를 고객이 읽어도 되는 표현으로 치환. 발송 전 마지막 안전망.
+
+    **사내 VOC 에서는 지우지 않는다** — 사내에서 이슈 키는 가장 유용한 정보다.
+    지우면 "그래서 어디서 추적하나요" 를 되묻게 만든다.
+    """
+    if not profile(prof).get("redact_keys", True):
+        return text or ""
     return issue_keys.STEM_RE.sub("유사 사례", text or "")

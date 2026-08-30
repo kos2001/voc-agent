@@ -190,6 +190,48 @@ def promote(*, title: str, members: list[str], failure_summary: str = "",
     return art
 
 
+def set_canonical_reply(article_id: str, body: str, *, from_key: str = "",
+                        author: str = "") -> dict | None:
+    """이 유형의 **정본 고객 답변**을 기록한다 — 사람이 검토·발송한 그 글.
+
+    왜 기사에 붙이나: 같은 유형의 문의가 반복되면 답변도 같아야 한다. 매번 새로
+    지어내면 고객사마다 다른 말을 듣게 되고, 사람이 고쳐 놓은 표현이 다음 답변에
+    남지 않는다. 기사는 '같은 고장' 을 묶는 유일한 축이므로 정본이 붙을 자리다.
+
+    덮어쓴다 — 가장 최근에 **발송된** 것이 정본이다. 옛 판본은 발송 큐의 이력에
+    남아 있으므로 여기서 또 쌓지 않는다.
+    """
+    if not (body or "").strip():
+        return None
+    env = _load_envelope()
+    art = next((a for a in env["articles"] if a.get("id") == article_id), None)
+    if art is None:
+        return None
+    art["canonical_reply"] = {"body": body.strip(), "from_key": from_key,
+                              "author": author, "updated_at": _now()}
+    art["updated_at"] = _now()
+    _save_envelope(env)
+    return art
+
+
+def canonical_reply_for(keys) -> tuple[str, str]:
+    """근거 키들이 속한 기사의 정본 답변. 반환 (본문, 기사 id). 없으면 ("", "").
+
+    첫 번째로 찾은 것을 쓴다 — 근거가 여러 기사에 걸치면 최상위 근거의 유형을
+    따르는 것이 맞다(정렬은 호출부가 관련도 순으로 준다).
+    """
+    idx = member_index()
+    for k in keys or []:
+        aid = idx.get(k)
+        if not aid:
+            continue
+        art = get(aid) or {}
+        body = (art.get("canonical_reply") or {}).get("body", "")
+        if body:
+            return body, aid
+    return "", ""
+
+
 def get(article_id: str) -> dict | None:
     return next((a for a in articles() if a.get("id") == article_id), None)
 

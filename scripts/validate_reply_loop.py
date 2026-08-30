@@ -51,6 +51,13 @@ os.environ.setdefault("RVP_JIRA_POLL_SEC", "0")
 import voc_agents as V          # noqa: E402
 import reply_queue              # noqa: E402
 
+# 대응 프로파일(external/internal)은 서버와 같은 환경변수를 본다 — 하네스가 다른
+# 프로파일로 재면 그 수치는 운영과 무관한 값이 된다.
+PROFILE = os.getenv("RVP_VOC_PROFILE", V.DEFAULT_PROFILE)
+# 프로파일마다 재야 할 입력이 다르다 — 사내 경로를 외부 고객 문의로 재면 분류·골격·
+# 정책이 전부 엉뚱한 것을 재게 된다. 키 접두사로 그 코퍼스를 고른다.
+KEY_PREFIX = os.getenv("RVP_VALIDATE_PREFIX", "IVOC-" if PROFILE == "internal" else "VOC-")
+
 # --------------------------------------------------------------------------- #
 # 1) 정책 검출 — 주입한 위반을 되찾는가 / 정상 문장을 잘못 잡지 않는가
 # --------------------------------------------------------------------------- #
@@ -109,39 +116,47 @@ NEGATIVES_EN: list[str] = [
 def check_policy_detection() -> tuple[int, int, int, int]:
     print("\n[1] 정책 검출 — 주입 위반 복원 / 정상 문장 오탐")
     hit = 0
+    # 프로파일이 "위반 아님" 으로 정한 코드는 **안 걸리는 것이 정답**이다. 그대로
+    # 미검출로 세면 사내 프로파일에서 검출률이 가짜로 떨어지고, 그 수치를 보고
+    # 규칙을 되살리는 잘못된 조치를 하게 된다.
+    sev = V.profile(PROFILE).get("severity") or {}
     for sentence, expect, kw in INJECTIONS:
         body = CLEAN.replace("감사합니다.", sentence + "\n\n감사합니다.")
-        codes = {v["code"] for v in V.check(body, **kw)["violations"]}
-        ok = expect in codes
+        codes = {v["code"] for v in V.check(body, prof=PROFILE, **kw)["violations"]}
+        off = sev.get(expect) == "off"
+        ok = (expect not in codes) if off else (expect in codes)
         hit += ok
-        print(f"  {'✓' if ok else '✗'} {expect:<22} ← {sentence[:36]}"
+        tag = f"{expect}(이 프로파일에서 위반 아님)" if off else expect
+        print(f"  {'✓' if ok else '✗'} {tag:<22} ← {sentence[:36]}"
               + ("" if ok else f"   (검출: {sorted(codes)})"))
     fp = 0
     for sentence in NEGATIVES:
         body = CLEAN.replace("감사합니다.", sentence + "\n\n감사합니다.")
-        bad = [v for v in V.check(body)["violations"] if v["severity"] == "block"]
+        bad = [v for v in V.check(body, prof=PROFILE)["violations"] if v["severity"] == "block"]
         fp += bool(bad)
         print(f"  {'✓' if not bad else '✗'} 오탐 없음            ← {sentence[:36]}"
               + ("" if not bad else f"   (오검출: {[v['code'] for v in bad]})"))
     # 영어 답변에도 같은 규칙이 살아 있는가 — 규칙이 언어에 따라 사라지면 없는 것과 같다.
     for sentence, expect in EN_INJECTIONS:
         body = CLEAN_EN.replace("Thank you.", sentence + "\n\nThank you.")
-        codes = {v["code"] for v in V.check(body, lang="en")["violations"]}
-        ok = expect in codes
+        codes = {v["code"] for v in V.check(body, lang="en", prof=PROFILE)["violations"]}
+        ok = (expect not in codes) if sev.get(expect) == "off" else (expect in codes)
         hit += ok
         print(f"  {'✓' if ok else '✗'} {expect:<22} ← (en) {sentence[:32]}"
               + ("" if ok else f"   (검출: {sorted(codes)})"))
     for sentence in NEGATIVES_EN:
         body = CLEAN_EN.replace("Thank you.", sentence + "\n\nThank you.")
-        bad = [v for v in V.check(body, lang="en")["violations"] if v["severity"] == "block"]
+        bad = [v for v in V.check(body, lang="en", prof=PROFILE)["violations"] if v["severity"] == "block"]
         fp += bool(bad)
         print(f"  {'✓' if not bad else '✗'} 오탐 없음(en)        ← {sentence[:34]}"
               + ("" if not bad else f"   (오검출: {[v['code'] for v in bad]})"))
-    ben = V.check(CLEAN_EN, lang="en")
+    ben = V.check(CLEAN_EN, lang="en", prof=PROFILE)
     print(f"  {'✓' if not ben['blocked'] else '✗'} 영어 기준 답변은 차단되지 않는다"
           + ("" if not ben["blocked"] else f"   {ben['violations']}"))
-    base = V.check(CLEAN)
+    base = V.check(CLEAN, prof=PROFILE)
     print(f"  {'✓' if not base['blocked'] else '✗'} 기준 답변은 차단되지 않는다")
+    print(f"  · 프로파일 {PROFILE} — 위반 아님으로 둔 코드: "
+          f"{[c for c, x in sev.items() if x == 'off'] or '없음'}")
     return hit, len(INJECTIONS) + len(EN_INJECTIONS), fp, len(NEGATIVES) + len(NEGATIVES_EN)
 
 
@@ -161,9 +176,9 @@ def run_corpus(use_llm: bool, limit: int) -> dict:
     server._record_gap = lambda *a, **k: None
     st = server._reco_state()
     keys = [k for k, v in st["by_key"].items()
-            if k.startswith("VOC-") and v.get("status") != "완료"][:limit]
-    print(f"\n[2] 전수 생성 — 미해결 VOC {len(keys)}건 "
-          f"({'LLM' if use_llm else '템플릿'} 경로)")
+            if k.startswith(KEY_PREFIX) and v.get("status") != "완료"][:limit]
+    print(f"\n[2] 전수 생성 — 미답변 {KEY_PREFIX}* {len(keys)}건 "
+          f"({'LLM' if use_llm else '템플릿'} 경로 · 프로파일 {PROFILE})")
     rows = []
     for key in keys:
         res = server.voc_reply_draft(server.ReplyDraftBody(key=key, use_llm=use_llm))
@@ -180,12 +195,14 @@ def run_corpus(use_llm: bool, limit: int) -> dict:
         measured = "\n".join(ln for ln in it["body"].split("\n")
                              if not ln.strip().startswith("요청하신 사항:"))
         hit = sum(1 for t in terms if t.lower() in measured.lower())
-        sections = V.INTENTS[it["intent"]]["sections"]
+        sections = V.intents_of(PROFILE)[it["intent"]]["sections"]
         rows.append({
             "key": key, "intent": it["intent"], "engine": it["engine"],
             "blocked": it["policy"]["blocked"],
             "codes": [v["code"] for v in it["policy"]["violations"]],
-            "leak": bool(re.search(r"[A-Z][A-Z0-9]*-\d+", it["body"])),
+            # 사내 프로파일에서는 이슈 키가 있어야 정상이다 — 유출이 아니다.
+            "leak": (V.profile(PROFILE).get("redact_keys", True)
+                     and bool(re.search(r"[A-Z][A-Z0-9]*-\d+", it["body"]))),
             "sections_ok": all(s in it["body"] for s in sections),
             "ask_terms": len(terms), "ask_hit": hit,
             "ask_covered": (hit >= min(2, len(terms))) if terms else None,
@@ -242,7 +259,8 @@ def report_corpus(rows: list[dict], use_llm: bool = False) -> None:
     warn = Counter(c for r in rows for c in r["codes"])
     print(f"\n  건수                 {len(rows)}")
     print(f"  발송 차단 잔존       {blocked}/{len(rows)}  (0 이어야 한다)")
-    print(f"  내부 키 유출         {leaks}/{len(rows)}  (0 이어야 한다)")
+    print(f"  내부 키 유출         {leaks}/{len(rows)}  (0 이어야 한다)"
+          + ("" if V.profile(PROFILE).get("redact_keys", True) else "   ← 사내는 키 노출이 정상"))
     print(f"  유형 골격 준수       {sec_ok}/{len(rows)}  ({sec_ok / n:.3f})")
     if askable:
         print(f"  요청 반영(어휘)      {covered}/{len(askable)}  ({covered / len(askable):.3f})")
@@ -357,6 +375,8 @@ def main() -> int:
     print(f"\n  검출 복원율          {hit}/{total}  ({hit / total:.3f})")
     print(f"  오탐(정상 문장 차단)  {fp}/{negs}")
 
+    ROWS = ROWS_CACHE.with_name(f"reply_validation_rows_{PROFILE}.json")
+    globals()["ROWS_CACHE"] = ROWS      # 프로파일별로 캐시를 나눈다 — 섞이면 수치가 거짓이 된다
     if a.reuse and ROWS_CACHE.exists():
         out = {"rows": json.loads(ROWS_CACHE.read_text(encoding="utf-8"))}
         print(f"\n[2] 전수 생성 — 직전 결과 재사용 ({len(out['rows'])}건, {ROWS_CACHE})")
@@ -376,9 +396,9 @@ def main() -> int:
     # 0건 검증은 통과가 아니라 실패다 — 아무것도 안 재고 초록을 내는 것이
     # 검증 하네스가 할 수 있는 가장 나쁜 일이다.
     if not out["rows"]:
-        print("\n실패 — 미해결 VOC 를 하나도 찾지 못했다. "
-              "RVP_KB_EXTRA(.env) 와 data/voc_mock_issues.json 을 확인하라 "
-              "(생성: .venv/bin/python scripts/build_voc_mock.py).")
+        print(f"\n실패 — {KEY_PREFIX}* 미답변 문의를 하나도 찾지 못했다. "
+              f"RVP_KB_EXTRA(.env) 에 해당 원천이 있는지 확인하라 "
+              f"(생성: scripts/build_voc_mock.py / scripts/build_internal_voc_mock.py).")
         return 1
     bad = ((hit < total) or fp or not en_ok
            or any(r["blocked"] or r["leak"] for r in out["rows"]))

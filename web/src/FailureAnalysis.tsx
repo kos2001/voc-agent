@@ -15,7 +15,7 @@ type Match = {
   key: string; score: number; summary: string; chip: string; category: string;
   root_cause: string; resolution: string; workaround: string; debug_approach: string;
   embed_cos?: number; entity_overlap?: number; bm25_raw?: number; rerank_score?: number; verified?: boolean;
-  known_issue?: { id: string; title: string };   // 소속 고장모드 기사(P2-4)
+  known_issue?: { id: string; title: string };   // 소속 반복 문의 유형(Known-Issue)
   lifecycle?: { state: string; superseded_by: string; freshness: number | null; fw_version: string; warnings: string[] };  // 수명주기(P2-5)
 };
 type Proposal = { root_cause: string; resolution: string; workaround: string; based_on: string; confidence: number };
@@ -29,7 +29,8 @@ type RecoResp = { query: any; matches: Match[]; proposal: Proposal | null; cover
   reply_policy?: { ok: boolean; blocked: boolean; violations: { code: string; severity: string; detail: string }[] } | null;
   reply_intent?: string; reply_asks?: string[]; reply_lang?: string;
   reply_proofread?: { ran?: boolean; applied?: boolean; rejected?: string; error?: string } | null;
-  intent?: string; intent_label?: string; asks?: string[]; customer_ask?: string };
+  intent?: string; intent_label?: string; asks?: string[]; customer_ask?: string;
+  profile?: string };
 
 // 분류 칩 — 다크 배경에서 읽히도록 -950/60 배경 + -400 글자(하네스 배지 규칙).
 const CAT_COLOR: Record<string, string> = {
@@ -357,6 +358,13 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
   // 서버가 다시 생성하면 사람이 읽고 판단한 글과 큐에 들어가는 글이 달라진다.
   // 이 화면의 목적은 '대응' 이므로, 지표도 대응 진행도를 본다.
   const [replyStats, setReplyStats] = useState<any>(null);
+  // 대응 프로파일(외부 고객 / 사내 VOC) — 서버가 정본이다. 화면이 하드코딩하면
+  // 규칙과 표시가 갈라진다.
+  const [profileLabel, setProfileLabel] = useState("");
+  useEffect(() => {
+    fetch(`${API}/voc/reply/intents`).then((r) => (r.ok ? r.json() : null))
+      .then((d) => d && setProfileLabel(d.profile_label || "")).catch(() => {});
+  }, []);
   const loadReplyStats = () => fetch(`${API}/voc/reply/stats`).then((r) => (r.ok ? r.json() : null))
     .then((d) => d && setReplyStats(d)).catch(() => {});
   useEffect(() => { loadReplyStats(); }, []);
@@ -433,14 +441,20 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
     } catch { /* 피드백 실패는 조용히 무시(분석 흐름 방해 금지) */ }
   };
 
-  // P2-4 고장모드 기사로 묶기 — 아직 기사에 속하지 않은 현재 매치들을 승격
+  // 반복 문의 유형(Known-Issue)으로 묶기 — 아직 유형에 속하지 않은 매치들을 승격.
+  // VOC 대응에서 이 묶음이 갖는 뜻: 같은 문의가 반복되면 **답변도 하나여야 한다.**
   const [promoting, setPromoting] = useState(false);
   const [promoteMsg, setPromoteMsg] = useState("");
   const promoteMatches = async () => {
     const ms = reco?.matches ?? [];
     const free = ms.filter((m) => !m.known_issue).map((m) => m.key);
     if (free.length < 2) return;
-    const title = (sel?.summary ?? reco?.query?.summary ?? "고장모드").slice(0, 80);
+    // 제목에서 고객사·호스트 꼬리표를 뗀다. 기사는 **유형**의 이름이지 한 고객의
+    // 티켓 이름이 아니다 — 실제로 "…(Orion Telecom / Cust" 처럼 고객사가 박혔고,
+    // 그 제목이 화면 곳곳에 그대로 나왔다.
+    const rawTitle = (sel?.summary ?? reco?.query?.summary ?? "반복 문의 유형");
+    const title = rawTitle.replace(/\s*\([^)]*\)\s*$/, "").replace(/\s*\(.*$/, "").slice(0, 80).trim()
+      || rawTitle.slice(0, 80);
     setPromoting(true); setPromoteMsg("");
     try {
       const d = await fetch(`${API}/knowledge/known-issue`, {
@@ -448,7 +462,7 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
         body: JSON.stringify({ title, members: free }),
       }).then((r) => r.json());
       if (d.ok) {
-        setPromoteMsg(`✓ 고장모드 기사 ${d.article.id} 생성 — ${free.length}건 묶음`);
+        setPromoteMsg(`✓ 반복 문의 유형 ${d.article.id} 생성 — ${free.length}건 묶음`);
         if (sel) select(sel);                // 재조회로 기사 배지 반영
       } else setPromoteMsg(`⚠ ${d.error || "승격 실패"}`);
     } catch (e: any) { setPromoteMsg(`⚠ ${e.message}`); } finally { setPromoting(false); }
@@ -696,9 +710,21 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
         <header className="px-6 pt-8 sm:px-8">
           <div className="mb-5 flex items-start justify-between gap-4">
             <div>
-              <h1 className="text-2xl font-semibold tracking-tight text-zinc-50">VOC 대응</h1>
+              <div className="flex items-center gap-2">
+                <h1 className="text-2xl font-semibold tracking-tight text-zinc-50">
+                  {profileLabel === "사내 VOC 대응" ? "사내 VOC 대응" : "VOC 대응"}
+                </h1>
+                {profileLabel && (
+                  <span className="rounded-full border border-zinc-700 px-2 py-0.5 text-[11px] text-zinc-300"
+                    title="대응 프로파일 — 요청 유형 체계와 발송 정책이 여기서 갈립니다 (RVP_VOC_PROFILE)">
+                    {profileLabel}
+                  </span>
+                )}
+              </div>
               <p className="mt-1.5 text-sm text-zinc-300">
-                고객 문의에 보낼 답변을 만들고, 검토한 뒤 발송합니다 — 과거 해결 사례가 근거입니다
+                {profileLabel === "사내 VOC 대응"
+                  ? "사내 서비스 요청에 보낼 답변을 만들고, 검토한 뒤 발송합니다 — 과거 처리 사례가 근거입니다"
+                  : "고객 문의에 보낼 답변을 만들고, 검토한 뒤 발송합니다 — 과거 해결 사례가 근거입니다"}
               </p>
             </div>
             <FreshnessBadge onSynced={() => {
@@ -1038,9 +1064,9 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
                         <h3 className="text-sm font-semibold tracking-tight text-zinc-200">유사 과거 해결 사례 {reco.matches.length}건</h3>
                         {reco.matches.filter((m) => !m.known_issue).length >= 2 && (
                           <button onClick={promoteMatches} disabled={promoting}
-                            title="아직 기사에 속하지 않은 매치들을 하나의 고장모드(Known-Issue) 기사로 묶습니다"
+                            title="같은 유형의 사례들을 하나로 묶습니다 — 이 유형에 발송한 답변이 다음 문의의 정본이 됩니다"
                             className="ml-auto rounded border border-zinc-600 px-2 py-0.5 text-[11px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-40">
-                            {promoting ? "묶는 중…" : "📚 고장모드 기사로 묶기"}
+                            {promoting ? "묶는 중…" : "📚 반복 문의 유형으로 묶기"}
                           </button>
                         )}
                       </div>
@@ -1050,7 +1076,8 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
                           .map((m) => [m.known_issue!.id, m.known_issue!])).values());
                         return arts.length > 0 ? (
                           <div className="mb-3 rounded-lg border border-sky-900/60 bg-sky-950/40 px-3 py-2 text-[11px] text-sky-400">
-                            📚 이 사례들은 고장모드 기사로 묶여 있습니다: {arts.map((a) => `${a.id} ${a.title}`).join(" · ")}
+                            📚 같은 <b>반복 문의 유형</b>입니다: {arts.map((a) => `${a.id} ${a.title}`).join(" · ")}
+                          {" "}— 이 유형에 발송한 답변이 다음 문의의 정본이 됩니다.
                           </div>
                         ) : null;
                       })()}
@@ -1067,7 +1094,7 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
                                 <span className="rounded bg-emerald-950/60 px-1.5 py-0.5 text-[10px] text-emerald-400" title="해결 검증 + 고객 확인 완료">✓ 검증됨</span>
                               )}
                               {m.known_issue && (
-                                <span className="rounded bg-sky-950/60 px-1.5 py-0.5 text-[10px] text-sky-400" title={`고장모드 기사: ${m.known_issue.title}`}>📚 {m.known_issue.id}</span>
+                                <span className="rounded bg-sky-950/60 px-1.5 py-0.5 text-[10px] text-sky-400" title={`반복 문의 유형: ${m.known_issue.title}`}>📚 {m.known_issue.id}</span>
                               )}
                               {m.lifecycle && m.lifecycle.warnings.length > 0 && (
                                 <span className="rounded bg-amber-950/60 px-1.5 py-0.5 text-[10px] text-amber-400"

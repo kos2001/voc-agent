@@ -1,7 +1,7 @@
 /** 지식 현황 대시보드.
  *
  * 백엔드가 이미 계산하지만 화면이 없던 신호들을 한곳에 모은다 — KB 구성, 인입 품질,
- * 중복 클러스터, 지식 모순, 지식 공백, 추천 효능, 수명주기, 개선 큐, 기여자, 고장모드 기사.
+ * 중복 클러스터, 지식 모순, 지식 공백, 추천 효능, 수명주기, 개선 큐, 기여자, 반복 문의 유형.
  *
  * 카드마다 독립적으로 fetch 한다: 엔드포인트 하나가 실패해도 나머지는 보이고, 실패한
  * 카드만 재시도 버튼을 띄운다(전체 화면이 백지가 되는 것을 막는다).
@@ -370,7 +370,7 @@ export default function Dashboard({ onOpenIssue, can }: {
 
         {/* 중복 지식 */}
         <Card title="중복 지식 (클러스터)" wide
-          hint="유사도 0.80 이상으로 뭉친 사례 — 고장모드 기사로 승격 대상"
+          hint="유사도 0.80 이상으로 뭉친 사례 — 반복 문의 유형으로 승격 대상"
           loading={clusters.loading} error={clusters.error} onRetry={clusters.reload}>
           {clusters.data?.count ? (
             <>
@@ -526,8 +526,8 @@ export default function Dashboard({ onOpenIssue, can }: {
           </div>
         </Card>
 
-        {/* 고장모드 기사 */}
-        <Card title="고장모드 기사 (Known-Issue)" hint="중복 사례를 하나로 묶은 정규 문서"
+        {/* 반복 문의 유형 */}
+        <Card title="반복 문의 유형 (Known-Issue)" hint="같은 문의를 하나로 묶은 정본 — 발송한 답변이 다음 문의의 기준이 된다"
           loading={articles.loading} error={articles.error} onRetry={articles.reload}>
           {articles.data?.articles?.length ? (
             <div className="space-y-1.5 max-h-60 overflow-y-auto pr-1">
@@ -542,7 +542,7 @@ export default function Dashboard({ onOpenIssue, can }: {
             <>
               <Ok text="기사 없음" />
               <div className="mt-1 text-[11px] text-zinc-400">
-                분석 화면에서 "📚 고장모드 기사로 묶기"로 만들 수 있습니다.
+                VOC 대응 화면에서 "📚 반복 문의 유형으로 묶기"로 만들 수 있습니다.
               </div>
             </>
           )}
