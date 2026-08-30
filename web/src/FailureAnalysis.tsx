@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { browseUrl, linkifyKeys } from "./issueLinks";
+import { postJson } from "./api";
 import RelationGraph, { type GraphData } from "./RelationGraph";
 import FreshnessBadge from "./FreshnessBadge";
 import { Button, inputCls, selectCls } from "./ui";
@@ -29,6 +31,7 @@ type RecoResp = { query: any; matches: Match[]; proposal: Proposal | null; cover
   reply_policy?: { ok: boolean; blocked: boolean; violations: { code: string; severity: string; detail: string }[] } | null;
   reply_intent?: string; reply_asks?: string[]; reply_lang?: string;
   reply_proofread?: { ran?: boolean; applied?: boolean; rejected?: string; error?: string } | null;
+  reply_policy_docs?: { title: string; section: string; url: string }[];
   intent?: string; intent_label?: string; asks?: string[]; customer_ask?: string;
   profile?: string };
 
@@ -318,7 +321,8 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
                                     reply_intent: d.intent_label || "",
                                     reply_asks: d.asks || [],
                                     reply_lang: d.lang || "ko",
-                                    reply_proofread: d.proofread ?? null } : prev));
+                                    reply_proofread: d.proofread ?? null,
+                                    reply_policy_docs: d.policy_docs ?? [] } : prev));
         finish();
       } else if (d.type === "error") {
         setReco((prev) => (prev ? { ...prev, explanation: (prev.explanation || "") + `\n\n_(생성 오류: ${d.message})_` } : prev));
@@ -331,7 +335,9 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
   const explain = () => { if (sel) runExplain(sel.key); };
   const reExplain = () => { if (sel) runExplain(sel.key, true); };
 
-  // RCA 댓글 초안 → HITL 승인 대기 큐에 추가 (Jira 게시는 승인 시에만)
+  // 분석 코멘트 초안 → HITL 게시 대기 큐 (Jira 게시는 승인 시에만).
+  // 고객 답변과 다른 산출물이다 — 이건 이슈에 남기는 **내부 기록**이고, 읽는 사람은
+  // 다음에 이 이슈를 여는 엔지니어다.
   // 큐 진입 결과를 심각도(ok/info/warn)로 표준화 — '왜 안 들어갔는지'를 또렷이 표시
   type QMsg = { sev: "ok" | "info" | "warn"; text: string } | null;
   const qmsgOf = (d: any): QMsg => {
@@ -346,9 +352,7 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
     if (!sel) return;
     setDrafting(true); setDraftMsg(null);
     try {
-      const d = await fetch(`${API}/rca/draft`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: sel.key }),
-      }).then((r) => r.json());
+      const d = await postJson(`/rca/draft`, { key: sel.key });
       setDraftMsg(qmsgOf(d));
       if (d.queued) onQueueChange?.();
     } catch (e: any) { setDraftMsg({ sev: "warn", text: e.message }); } finally { setDrafting(false); }
@@ -386,10 +390,8 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
     if (!sel) return;
     setAckBusy(true); setAckMsg(null);
     try {
-      const d = await fetch(`${API}/voc/reply/draft`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key: sel.key, again: replyStatus?.state === "approved" }),
-      }).then((r) => r.json());
+      const d = await postJson(`/voc/reply/draft`,
+        { key: sel.key, again: replyStatus?.state === "approved" });
       setAckMsg(d?.queued
         ? { sev: "ok", text: d.reason || "발송 대기 큐에 추가됨" }
         : { sev: d?.reason_code === "already_sent" ? "info" : "warn",
@@ -407,10 +409,8 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
     if (!sel || !reco?.explanation) return;
     setQueueing(true); setQueueMsg(null);
     try {
-      const d = await fetch(`${API}/voc/reply/draft-from-text`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key: sel.key, body: reco.explanation, again: replySent }),
-      }).then((r) => r.json());
+      const d = await postJson(`/voc/reply/draft-from-text`,
+        { key: sel.key, body: reco.explanation, again: replySent });
       setReplySent(d?.reason_code === "already_sent");
       setQueueMsg(d?.queued
         ? { sev: "ok", text: d.reason || "발송 대기 큐에 추가됨" }
@@ -549,11 +549,7 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
     if (!sel) return;
     setInvBusy(true); setInvErr(""); setInvMd("");
     try {
-      const r = await fetch(`${API}/recommend/investigate`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key: sel.key, k: 5 }),
-      });
-      const d = await r.json();
+      const d = await postJson(`/recommend/investigate`, { key: sel.key, k: 5 });
       if (d.available) setInvMd(d.markdown || "");
       // 검증에 걸려 막힌 경우도 조용히 비우지 않는다 — 장애와 구분이 안 된다.
       else setInvErr(d.message || "조사 계획을 만들지 못했습니다.");
@@ -685,8 +681,10 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
                 </div>
                 <div className="text-sm mt-1 leading-snug line-clamp-2">{i.summary}</div>
               </button>
+              {/* 예전에는 opacity-0 이라 hover 전에는 존재조차 보이지 않았다 —
+                  "Jira 링크가 없다" 는 신고의 원인이다. 항상 흐리게 두고 hover 에 밝힌다. */}
               <JiraLink base={jiraBase} issueKey={i.key} tabIndex={active ? 0 : -1}
-                className="px-2 py-3 opacity-0 group-hover:opacity-100 focus:opacity-100 shrink-0" />
+                className="px-2 py-3 opacity-50 group-hover:opacity-100 focus:opacity-100 shrink-0" />
             </div>
             );
           })}
@@ -790,7 +788,15 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
             <section className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-5">
               <div className="flex items-center gap-2 mb-2">
                 <span className={`w-2.5 h-2.5 rounded-full ${statusBadge(sel.status)}`} />
-                <span className="font-mono text-sm text-zinc-400">{sel.key}</span>
+                {jiraBase ? (
+                  <a href={browseUrl(jiraBase, sel.key)} target="_blank" rel="noreferrer"
+                    title={`Jira에서 ${sel.key} 원문 열기 (새 탭)`}
+                    className="font-mono text-sm text-sky-400 underline decoration-dotted underline-offset-2 hover:text-sky-300">
+                    {sel.key}
+                  </a>
+                ) : (
+                  <span className="font-mono text-sm text-zinc-400">{sel.key}</span>
+                )}
                 <span className="text-xs text-zinc-400">{sel.status}</span>
                 <span className={`text-xs px-2 py-0.5 rounded ${CAT_COLOR[sel.category] ?? CAT_FALLBACK}`}>{sel.category}</span>
                 <span className="rounded bg-zinc-800 px-2 py-0.5 text-xs text-zinc-300">{sel.chip}</span>
@@ -986,10 +992,36 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
                       ) : (
                         <>
                           <div className="prose prose-sm prose-invert max-w-none prose-headings:text-emerald-300 prose-headings:my-2 prose-p:my-1">
-                            <ReactMarkdown remarkPlugins={[remarkGfm]}>{reco.explanation || "생성 중…"}</ReactMarkdown>
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}
+                              components={{ a: ({ node, ...p }) => <a {...p} target="_blank" rel="noreferrer" /> }}>
+                              {linkifyKeys(reco.explanation || "생성 중…", jiraBase)}</ReactMarkdown>
                           </div>
 
-                          {(reco.reply_policy?.violations?.length ?? 0) > 0 && (
+                          {(reco.reply_policy_docs?.length ?? 0) > 0 && (
+                          // 어떤 지침을 적용했는지 보여준다 — 검토자가 "왜 이렇게 답했나" 를
+                          // 확인하려면 그 문단으로 갈 수 있어야 한다.
+                          <div className="mt-3 border-t border-zinc-800 pt-3">
+                            <div className="text-[11px] text-zinc-500">적용한 사내 지침</div>
+                            <div className="mt-1 flex flex-wrap gap-1.5">
+                              {reco.reply_policy_docs!.map((g, i) => (
+                                g.url ? (
+                                  <a key={i} href={g.url} target="_blank" rel="noreferrer"
+                                    title={`${g.title} — 원문 열기 (새 탭)`}
+                                    className="rounded border border-zinc-700 px-1.5 py-0.5 text-[11px] text-sky-400 hover:border-sky-600">
+                                    📘 {g.section || g.title} ↗
+                                  </a>
+                                ) : (
+                                  <span key={i} title={g.title}
+                                    className="rounded border border-zinc-700 px-1.5 py-0.5 text-[11px] text-zinc-300">
+                                    📘 {g.section || g.title}
+                                  </span>
+                                )
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {(reco.reply_policy?.violations?.length ?? 0) > 0 && (
                             <div className="mt-3 space-y-1 border-t border-zinc-800 pt-3">
                               {reco.reply_policy!.violations.map((v, i) => (
                                 <div key={i} className={`rounded-lg border px-2 py-1 text-[12px] ${
@@ -1046,9 +1078,9 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
                         {sel && sel.status !== "완료" && (
                           <div className="mt-4">
                             <button onClick={draftRca} disabled={drafting}
-                              title="엔지니어가 읽을 RCA 댓글 초안을 만들어 승인 대기 큐에 추가 (게시는 승인 시에만)"
+                              title="이슈에 남길 내부 분석 코멘트 초안을 만들어 게시 대기에 추가 (Jira 게시는 승인 시에만)"
                               className="inline-flex items-center rounded-lg border border-zinc-600 px-4 py-2 text-sm font-medium text-zinc-200 transition hover:bg-zinc-800 disabled:opacity-40">
-                              {drafting ? "초안 생성 중…" : "🤖 RCA 댓글 초안 (엔지니어용) → 승인 대기"}
+                              {drafting ? "초안 생성 중…" : "🧾 분석 코멘트 초안 (이슈에 기록) → 게시 대기"}
                             </button>
                             <QNotice m={draftMsg} />
                           </div>
@@ -1085,9 +1117,22 @@ export default function FailureAnalysis({ onQueueChange, routeKey, onSelectKey, 
                         {reco.matches.map((m, mi) => (
                           <div key={m.key} className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
                             <div className="flex items-center gap-2 mb-1">
-                              <button onClick={() => goKey(m.key)} title="이 사례를 분석 화면에서 열기"
-                                className="font-mono text-xs font-semibold text-sky-400 hover:underline">{m.key}</button>
-                              <JiraLink base={jiraBase} issueKey={m.key} />
+                              {/* 키를 누르면 **Jira 원문**이 열린다 — 사용자가 기대하는 동작이다.
+                                  이 화면에서 열기는 따로 둔다(예전에는 그게 키에 걸려 있었다). */}
+                              {jiraBase ? (
+                                <a href={browseUrl(jiraBase, m.key)} target="_blank" rel="noreferrer"
+                                  title={`Jira에서 ${m.key} 원문 열기 (새 탭)`}
+                                  className="font-mono text-xs font-semibold text-sky-400 underline decoration-dotted underline-offset-2 hover:text-sky-300">
+                                  {m.key}
+                                </a>
+                              ) : (
+                                <button onClick={() => goKey(m.key)} title="이 사례를 화면에서 열기"
+                                  className="font-mono text-xs font-semibold text-sky-400 hover:underline">{m.key}</button>
+                              )}
+                              <button onClick={() => goKey(m.key)} title="이 사례를 이 화면에서 열기"
+                                className="rounded border border-zinc-700 px-1.5 text-[10px] text-zinc-400 hover:border-sky-600 hover:text-sky-400">
+                                여기서 열기
+                              </button>
                               <span className={`text-[10px] px-1.5 py-0.5 rounded ${CAT_COLOR[m.category] ?? CAT_FALLBACK}`}>{m.category}</span>
                               <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-300">{m.chip}</span>
                               {m.verified && (

@@ -306,7 +306,7 @@ _ASK_STOP = {"알려주세요", "알려", "주세요", "부탁드립니다", "�
 # 요청의 `롤백하면` 이 본문의 `롤백` 과 안 맞아 오탐이 났다. 형태소 분석기를 들이지
 # 않고(정책 검사는 무거운 의존성 없이 결정적으로 돌아야 한다) 흔한 어미만 벗긴다.
 _ENDING_RE = re.compile(r"(하면|해야|하는지|되는지|입니다|합니다|하고|해서|한다|된다|였다|"
-                        r"이라도|라도|인지|한지|까지|부터|에서|으로|이고|이며|된|한|할|될|인)$")
+                        r"이라도|라도|인지|한지|까지|부터|에서|으로|이고|이며|된|한|할|될|인|해)$")
 
 
 def _stem(tok: str) -> str:
@@ -323,6 +323,11 @@ def _stem(tok: str) -> str:
         else:
             break
     return t
+
+
+# 한국어 어간 추출은 **한 곳에서만** 한다 — 지침 검색(guides)과 요청 반영 판정이
+# 서로 다른 규칙을 쓰면 "환불해" 가 한쪽에서는 '환불' 이고 다른 쪽에서는 아닌 상태가 된다.
+stem_token = _stem
 
 
 def ask_terms(ask: str, n: int = 6) -> list[str]:
@@ -498,7 +503,8 @@ def _evidence_block(matches: list[dict], proposal: dict | None, forbidden=()) ->
 
 def reply_prompt(rec: dict, matches: list[dict], proposal: dict | None,
                  intent: dict, *, guidance: str = "", lang: str = "ko",
-                 forbidden=(), canonical: str = "", prof: str = "") -> str:
+                 forbidden=(), canonical: str = "", prof: str = "",
+                 policy_docs: str = "") -> str:
     """고객 답변 생성 프롬프트. 유형별 골격 + 요청 문장 + 근거(키 제거) + 문체 규칙.
 
     lang="en" 이면 답변 언어만 바꾼다 — 골격·근거·규칙은 같다. 규칙을 언어별로
@@ -507,6 +513,10 @@ def reply_prompt(rec: dict, matches: list[dict], proposal: dict | None,
     canonical — 같은 유형에 **이미 검토·발송한 정본 답변**. 같은 문의가 반복되면
     답변도 같아야 한다. 매번 새로 지어내면 고객사마다 다른 말을 듣게 되고, 사람이
     고쳐 놓은 표현이 다음 답변에 남지 않는다.
+
+    policy_docs — Confluence·FAQ 등 **사내 지침**. 사례와 역할이 다르다: 사례는
+    "예전에 이랬다" 는 근거이고 지침은 "이렇게 답해야 한다" 는 규칙이다. 충돌하면
+    **지침이 이긴다** — 규정이 바뀌었는데 옛 사례대로 답하면 틀린 답이 아니라 사고다.
     """
     pf = profile(prof)
     asks = intent.get("asks") or []
@@ -524,6 +534,9 @@ def reply_prompt(rec: dict, matches: list[dict], proposal: dict | None,
             + sections + "\n\n" + (pf.get("rules_en") or _STYLE_RULES_EN) + "\n"
             f"## Customer inquiry\n{rec.get('summary', '')}\n{rec.get('symptom', '')}\n"
             + (f"What they asked for: {rec.get('customer_ask', '')}\n" if rec.get("customer_ask") else "")
+            + (f"\n## Answering policy (internal guidelines/FAQ — **these override past "
+               f"cases.** Follow the procedures, wording and prohibitions they set)\n"
+               f"{policy_docs}\n" if policy_docs else "")
             + "\n## Reference material (internal, in Korean. Ground the reply in it, but "
               "rewrite it in the customer's words — never paste it)\n"
             + _evidence_block(matches, proposal, forbidden)
@@ -543,7 +556,10 @@ def reply_prompt(rec: dict, matches: list[dict], proposal: dict | None,
         f"## 고객 문의\n{rec.get('summary', '')}\n{rec.get('symptom', '')}\n"
         + (f"고객이 요청한 것: {rec.get('customer_ask', '')}\n" if rec.get("customer_ask") else "")
         + "\n"
-        "## 참고 자료 (내부 자료입니다. 이 내용을 근거로 삼되 그대로 옮기지 말고 "
+        + (f"## 답변 지침 (사내 규정·FAQ — **사례보다 우선합니다.** 지침과 과거 사례가 "
+           f"어긋나면 지침을 따르고, 지침이 정한 절차·표현·금지사항을 그대로 지키세요)\n"
+           f"{policy_docs}\n\n" if policy_docs else "")
+        + "## 참고 자료 (내부 자료입니다. 이 내용을 근거로 삼되 그대로 옮기지 말고 "
         "고객이 이해할 말로 바꿔 쓰세요)\n" + _evidence_block(matches, proposal, forbidden)
         + (f"\n\n## 같은 유형에 이미 검토·발송한 정본 답변 (내용·표현을 따르고 "
            f"모순되게 쓰지 마세요. 이 문의의 사실관계에 맞게만 조정합니다)\n{canonical}"

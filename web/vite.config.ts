@@ -11,7 +11,7 @@ import react from '@vitejs/plugin-react'
 // 즉 이 프록시는 개발 환경을 프로덕션과 같은 모양으로 만드는 것이다.
 const API_PREFIXES = [
   'auth', 'health', 'config', 'webhook', 'reco', 'voc', 'issues', 'graph',
-  'recommend', 'rca', 'knowledge', 'eval', 'improve', 'selfcheck', 'jira', 'explain',
+  'recommend', 'rca', 'chat', 'knowledge', 'eval', 'improve', 'selfcheck', 'jira', 'explain',
 ]
 
 const API_TARGET = process.env.VITE_PROXY_TARGET ?? 'http://127.0.0.1:8011'

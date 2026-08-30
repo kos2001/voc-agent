@@ -46,7 +46,7 @@ const LEVER_KO: Record<string, string> = {
 const LEVER_HINT: Record<string, string> = {
   retrieval: "근거 검색이 틀렸다 → 게이트·랭킹 파라미터를 동결 평가셋에 검증 후 적용",
   generation: "근거는 맞는데 글이 틀렸다 → 프롬프트 규칙 자동 주입 + 평가셋 보강",
-  knowledge: "KB 에 답이 없거나 낡았다 → 사람이 RCA 작성·폐기",
+  knowledge: "KB 에 답이 없거나 낡았다 → 사람이 분석 작성·폐기",
   presentation: "내용은 맞고 형식이 틀렸다 → 검증기 규칙으로 승인 전 차단",
   other: "위 분류에 해당하지 않음",
 };
@@ -112,6 +112,8 @@ export default function Dashboard({ onOpenIssue, can }: {
   // 고객에게 실제로 나간 글의 성패 — 이 서비스의 최종 산출물이다.
   const reply = useEndpoint<any>("/voc/reply/stats");
   const draft = useEndpoint<any>("/rca/draft-feedback");
+  // 지침 원천 — 답변이 무엇을 규칙으로 삼고 있는지. 비어 있으면 답변은 사례만 보고 나간다.
+  const guides = useEndpoint<any>("/guides");
   const sources = useEndpoint<any>("/knowledge/sources");
 
   const reco = useEndpoint<any>("/reco/stats");
@@ -205,9 +207,33 @@ export default function Dashboard({ onOpenIssue, can }: {
           )}
         </Card>
 
+        <Card title="답변 지침 원천" hint="Confluence·FAQ·문서 — 사례보다 우선하는 규칙"
+          loading={guides.loading} error={guides.error} onRetry={guides.reload}>
+          {(guides.data?.sections ?? 0) === 0 ? (
+            <EmptyState message="연결된 지침이 없습니다. RVP_GUIDE_SOURCES 에 Confluence 페이지·FAQ URL·문서를 지정하고 /guides/sync 를 호출하세요. 지침이 없으면 답변은 과거 사례만 보고 나갑니다." />
+          ) : (
+            <>
+              <div className="grid grid-cols-3 gap-2">
+                <StatTile label="문서" value={guides.data.docs} />
+                <StatTile label="섹션" value={guides.data.sections}
+                  title="지침은 문단 단위로 찾는다 — 긴 문서 한 장이 프롬프트를 다 먹지 않도록" />
+                <StatTile label="수집 실패" value={guides.data.errors?.length ?? 0}
+                  tone={(guides.data.errors?.length ?? 0) ? "bad" : "neutral"}
+                  title="원천 하나가 막혀도 나머지는 수집된다 — 다만 조용히 넘어가지는 않는다" />
+              </div>
+              <div className="mt-2 text-[11px] text-zinc-400">
+                마지막 수집 {guides.data.updated_at || "—"} · 원천 {(guides.data.sources ?? []).length}개
+              </div>
+              {(guides.data.errors ?? []).map((e: any, i: number) => (
+                <div key={i} className="mt-1 text-[11px] text-red-400">⚠ {e.source}: {e.error}</div>
+              ))}
+            </>
+          )}
+        </Card>
+
         {/* RCA 초안 품질 — 엔지니어가 읽는 분석의 성패. 고객 답변과 분리해서 본다. */}
-        <Card title="RCA 초안 품질" wide
-          hint="RCA 분석 초안이 사람 손을 안 타고 게시된 비율 — 엔지니어용 산출물 지표"
+        <Card title="분석 코멘트 품질" wide
+          hint="이슈에 남기는 내부 분석 코멘트가 사람 손을 안 타고 게시된 비율"
           loading={draft.loading} error={draft.error} onRetry={draft.reload}>
           {(draft.data?.stats?.judged ?? 0) === 0 ? (
             <EmptyState message="아직 판정된 초안이 없습니다. 승인 대기 화면에서 초안을 승인·거부하면 여기에 쌓입니다." />
@@ -284,7 +310,7 @@ export default function Dashboard({ onOpenIssue, can }: {
               sub="중복 제거 후" title="파일별 건수를 더한 값과 다르면 키가 겹친 것이다" />
             <StatTile label="해결(근거)" value={sources.data?.resolved ?? "—"} sub="검색 대상" />
             <StatTile label="큐레이션" value={sources.data?.curated_in_live ?? "—"}
-              sub="승인 RCA 환류" title="사람이 승인·수정해 KB 에 되돌아온 분석" />
+              sub="게시 분석 환류" title="사람이 검토·수정해 KB 에 되돌아온 분석" />
           </div>
           <BarList labelW={150}
             items={(sources.data?.sources ?? []).map((x: any) => ({
@@ -346,11 +372,11 @@ export default function Dashboard({ onOpenIssue, can }: {
               value={fb.data?.stats?.total ? `${Math.round((fb.data.stats.helpful_rate ?? 0) * 100)}%` : "—"}
               sub={`피드백 ${fb.data?.stats?.total ?? 0}건`}
               title="매치 카드의 👍/👎 집계" />
-            <StatTile label="RCA 효능"
+            <StatTile label="분석 효능"
               tone={(outcomes.data?.efficacy_rate ?? 0) >= 0.5 ? "good" : "warn"}
               value={outcomes.data?.total_tracked ? `${Math.round((outcomes.data.efficacy_rate ?? 0) * 100)}%` : "—"}
               sub={`추적 ${outcomes.data?.total_tracked ?? 0}건 · 대기 ${outcomes.data?.pending ?? 0}`}
-              title="게시된 RCA 이후 이슈가 실제로 해결된 비율" />
+              title="분석 코멘트 게시 이후 이슈가 실제로 해결된 비율" />
           </div>
           {fb.data?.stats?.top_helpful_matches?.length > 0 && (
             <div className="mt-3">
@@ -522,7 +548,7 @@ export default function Dashboard({ onOpenIssue, can }: {
               title="이 기간이 지나면 사례의 신선도 점수가 절반이 된다" />
             <StatTile label="큐레이션 지식" value={kstore.data?.knowledge?.total ?? "—"}
               sub={kstore.data?.knowledge?.tracked_in_git ? "git 추적됨" : "git 미추적"}
-              title="사람이 승인·수정해 KB에 환류된 RCA" />
+              title="사람이 검토·수정해 KB에 환류된 분석" />
           </div>
         </Card>
 
@@ -622,7 +648,7 @@ export default function Dashboard({ onOpenIssue, can }: {
         </Card>
 
         {/* 기여 전문가 */}
-        <Card title="기여 전문가" hint="RCA 승인·수정 기여자"
+        <Card title="기여 전문가" hint="분석 코멘트 검토·수정 기여자"
           loading={experts.loading} error={experts.error} onRetry={experts.reload}>
           {experts.data?.experts?.length ? (
             <BarList items={experts.data.experts.map((e: any) => ({
