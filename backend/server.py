@@ -3280,6 +3280,48 @@ def selfcheck(save: bool = True):
     return self_improve.run(st["records"], save=save)
 
 
+@app.get("/selfcheck/status", dependencies=[Depends(require("knowledge.read"))])
+def selfcheck_status():
+    """자기개선 loop 이 **실제로 돌고 있는가**.
+
+    왜 필요한가: 대시보드는 loop 의 *결과*(개선 큐)만 보여줬다. 그래서 loop 이 4일간
+    죽어 있어도 화면이 똑같았다 — launchd plist 가 리네임 전 경로를 가리켜 조용히
+    아무 일도 하지 않았고, 아무도 몰랐다. 돌지 않는 자동화는 없는 자동화보다 나쁘다.
+    있다고 믿게 만들기 때문이다.
+
+    지연 판정은 리포트 파일과 이력의 **최신 시각**으로 한다 — 스케줄러가 무엇이든
+    (launchd·cron·hermes) 산출물이 없으면 안 돈 것이다. 스케줄러에게 묻지 않는다.
+    """
+    import datetime as _d
+    reports = sorted((ROOT / "claudedocs" / "self_improve").glob("selfcheck_*.md"))
+    last_report = reports[-1].name if reports else ""
+    hist = read_json(ROOT / "data" / "self_improve_history.json", [])
+    hist = hist if isinstance(hist, list) else []
+    stamps = [h.get("ts", "") for h in hist if h.get("ts")]
+    # 리포트 파일명(selfcheck_20260826T090003.md)이 이력보다 최신일 수 있다 — 둘 다 본다.
+    if last_report:
+        raw = last_report.replace("selfcheck_", "").replace(".md", "")
+        try:
+            stamps.append(_d.datetime.strptime(raw, "%Y%m%dT%H%M%S").isoformat(timespec="seconds"))
+        except ValueError:
+            pass
+    last = max(stamps) if stamps else ""
+    age_h = None
+    if last:
+        try:
+            age_h = round((_d.datetime.now() - _d.datetime.fromisoformat(last)).total_seconds() / 3600, 1)
+        except ValueError:
+            pass
+    max_age = float(os.getenv("RVP_SELFCHECK_MAX_AGE_H", "36"))   # 하루 1회 + 여유
+    return {
+        "last_run": last, "age_hours": age_h, "max_age_hours": max_age,
+        "stale": (age_h is None) or (age_h > max_age),
+        "runs_recorded": len(hist), "last_report": last_report,
+        "queue": improve_queue.counts() if hasattr(improve_queue, "counts") else {},
+        "scheduler_hint": os.getenv("RVP_SELFCHECK_SCHEDULER", "hermes cron"),
+    }
+
+
 class ParamEvalBody(BaseModel):
     param: str           # gate_cos | boost
     value: float

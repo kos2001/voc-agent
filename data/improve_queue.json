@@ -558,12 +558,12 @@
     "rationale": "통제 어휘 밖 빈출 용어가 다수 — 동의어 정규화로 검색성/집계 개선",
     "evidence": {
       "top_terms": [
-        "stack-up",
         "Firmware",
+        "stack-up",
+        "resolved",
+        "voc",
         "NFC",
         "NFC Controller",
-        "NFC-CTRL",
-        "NFC-Controller",
         "NFC3",
         "fw-NFC3"
       ]
@@ -572,7 +572,7 @@
     "id": "S-23",
     "state": "open",
     "created_at": "2026-06-17T09:00:15",
-    "updated_at": "2026-08-04T09:00:04"
+    "updated_at": "2026-08-30T23:12:50"
   },
   {
     "type": "promote_known_issue",
@@ -1013,19 +1013,27 @@
     "type": "promote_known_issue",
     "priority": "P3",
     "target": "LSI-118",
-    "rationale": "유사도 0.968로 묶인 7건 중복 사례 — 정규 기사로 승격 권장. 검색 정확도는 바뀌지 않고(실측) 매치에 '알려진 고장모드' 주석이 붙어 읽는 사람이 중복임을 알 수 있다.",
+    "rationale": "유사도 0.894로 묶인 15건 중복 사례 — 정규 기사로 승격 권장. 검색 정확도는 바뀌지 않고(실측) 매치에 '알려진 고장모드' 주석이 붙어 읽는 사람이 중복임을 알 수 있다.",
     "evidence": {
       "members": [
         "LSI-118",
         "LSI-76",
+        "VOC-53",
+        "VOC-45",
+        "VOC-21",
         "LSI-139",
+        "VOC-13",
         "LSI-202",
         "LSI-13",
         "LSI-55",
-        "LSI-97"
+        "VOC-37",
+        "VOC-5",
+        "LSI-97",
+        "VOC-61",
+        "VOC-29"
       ],
-      "size": 7,
-      "avg_similarity": 0.968,
+      "size": 15,
+      "avg_similarity": 0.894,
       "chips": [
         "MDM-5400"
       ]
@@ -1034,7 +1042,7 @@
     "id": "S-41",
     "state": "open",
     "created_at": "2026-08-02T09:00:15",
-    "updated_at": "2026-08-04T09:00:04"
+    "updated_at": "2026-08-30T23:12:50"
   },
   {
     "type": "promote_known_issue",
@@ -1058,9 +1066,10 @@
     },
     "action_hint": "POST /knowledge/known-issue (members 승격)",
     "id": "S-42",
-    "state": "open",
+    "state": "superseded",
     "created_at": "2026-08-02T09:00:15",
-    "updated_at": "2026-08-04T09:00:04"
+    "updated_at": "2026-08-30T23:09:39",
+    "superseded_reason": "최신 생성분에 더 이상 나타나지 않음"
   },
   {
     "type": "promote_known_issue",
@@ -1084,9 +1093,10 @@
     },
     "action_hint": "POST /knowledge/known-issue (members 승격)",
     "id": "S-43",
-    "state": "open",
+    "state": "superseded",
     "created_at": "2026-08-02T09:00:15",
-    "updated_at": "2026-08-04T09:00:04"
+    "updated_at": "2026-08-30T23:09:39",
+    "superseded_reason": "최신 생성분에 더 이상 나타나지 않음"
   },
   {
     "type": "promote_known_issue",
@@ -1345,15 +1355,15 @@
     "type": "promote_known_issue_bulk",
     "priority": "P3",
     "target": "",
-    "rationale": "승격 대상 군집이 30개 더 있다 — 상위 5건만 개별 제안으로 올렸다. 나머지는 대시보드의 '중복 지식' 카드에서 한 번에 본다.",
+    "rationale": "승격 대상 군집이 36개 더 있다 — 상위 5건만 개별 제안으로 올렸다. 나머지는 대시보드의 '중복 지식' 카드에서 한 번에 본다.",
     "evidence": {
-      "remaining": 25
+      "remaining": 31
     },
     "action_hint": "GET /knowledge/clusters",
     "id": "S-54",
     "state": "open",
     "created_at": "2026-08-02T19:09:37",
-    "updated_at": "2026-08-04T09:00:04"
+    "updated_at": "2026-08-30T23:12:50"
   },
   {
     "type": "promote_known_issue",
@@ -1377,8 +1387,93 @@
     },
     "action_hint": "POST /knowledge/known-issue (members 승격)",
     "id": "S-55",
-    "state": "open",
+    "state": "superseded",
     "created_at": "2026-08-02T19:30:13",
-    "updated_at": "2026-08-04T09:00:04"
+    "updated_at": "2026-08-30T23:09:39",
+    "superseded_reason": "최신 생성분에 더 이상 나타나지 않음"
+  },
+  {
+    "type": "promote_known_issue",
+    "priority": "P3",
+    "target": "VOC-2",
+    "rationale": "유사도 1.0로 묶인 8건 중복 사례 — 정규 기사로 승격 권장. 검색 정확도는 바뀌지 않고(실측) 매치에 '알려진 고장모드' 주석이 붙어 읽는 사람이 중복임을 알 수 있다.",
+    "evidence": {
+      "members": [
+        "VOC-2",
+        "VOC-18",
+        "VOC-42",
+        "VOC-10",
+        "VOC-34",
+        "VOC-50",
+        "VOC-58",
+        "VOC-26"
+      ],
+      "size": 8,
+      "avg_similarity": 1.0,
+      "chips": [
+        "PM9C3-NVMe"
+      ]
+    },
+    "action_hint": "POST /knowledge/known-issue (members 승격)",
+    "id": "S-56",
+    "state": "open",
+    "created_at": "2026-08-30T23:09:39",
+    "updated_at": "2026-08-30T23:12:50"
+  },
+  {
+    "type": "promote_known_issue",
+    "priority": "P3",
+    "target": "VOC-19",
+    "rationale": "유사도 1.0로 묶인 8건 중복 사례 — 정규 기사로 승격 권장. 검색 정확도는 바뀌지 않고(실측) 매치에 '알려진 고장모드' 주석이 붙어 읽는 사람이 중복임을 알 수 있다.",
+    "evidence": {
+      "members": [
+        "VOC-3",
+        "VOC-19",
+        "VOC-11",
+        "VOC-43",
+        "VOC-51",
+        "VOC-35",
+        "VOC-59",
+        "VOC-27"
+      ],
+      "size": 8,
+      "avg_similarity": 1.0,
+      "chips": [
+        "PM9C3-NVMe"
+      ]
+    },
+    "action_hint": "POST /knowledge/known-issue (members 승격)",
+    "id": "S-57",
+    "state": "open",
+    "created_at": "2026-08-30T23:09:39",
+    "updated_at": "2026-08-30T23:12:50"
+  },
+  {
+    "type": "promote_known_issue",
+    "priority": "P3",
+    "target": "VOC-4",
+    "rationale": "유사도 1.0로 묶인 8건 중복 사례 — 정규 기사로 승격 권장. 검색 정확도는 바뀌지 않고(실측) 매치에 '알려진 고장모드' 주석이 붙어 읽는 사람이 중복임을 알 수 있다.",
+    "evidence": {
+      "members": [
+        "VOC-4",
+        "VOC-20",
+        "VOC-12",
+        "VOC-44",
+        "VOC-52",
+        "VOC-36",
+        "VOC-60",
+        "VOC-28"
+      ],
+      "size": 8,
+      "avg_similarity": 1.0,
+      "chips": [
+        "ISOCELL-HP9"
+      ]
+    },
+    "action_hint": "POST /knowledge/known-issue (members 승격)",
+    "id": "S-58",
+    "state": "open",
+    "created_at": "2026-08-30T23:09:39",
+    "updated_at": "2026-08-30T23:12:50"
   }
 ]

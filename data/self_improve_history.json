@@ -548,5 +548,47 @@
     "gap_events": 0,
     "curated": 6,
     "known_issues": 1
+  },
+  {
+    "ts": "2026-08-30T23:09:39",
+    "draft_clean_rate": null,
+    "draft_accept_rate": null,
+    "draft_judged": 0,
+    "helpful_rate": 1.0,
+    "feedback_total": 1,
+    "roi_queries": 0,
+    "kb_quality_ok": true,
+    "efficacy_rate": 0.333,
+    "gap_events": 0,
+    "curated": 6,
+    "known_issues": 1
+  },
+  {
+    "ts": "2026-08-30T23:09:58",
+    "draft_clean_rate": null,
+    "draft_accept_rate": null,
+    "draft_judged": 0,
+    "helpful_rate": 1.0,
+    "feedback_total": 1,
+    "roi_queries": 0,
+    "kb_quality_ok": true,
+    "efficacy_rate": 0.333,
+    "gap_events": 0,
+    "curated": 6,
+    "known_issues": 1
+  },
+  {
+    "ts": "2026-08-30T23:12:50",
+    "draft_clean_rate": null,
+    "draft_accept_rate": null,
+    "draft_judged": 0,
+    "helpful_rate": 1.0,
+    "feedback_total": 1,
+    "roi_queries": 0,
+    "kb_quality_ok": true,
+    "efficacy_rate": 0.333,
+    "gap_events": 0,
+    "curated": 6,
+    "known_issues": 1
   }
 ]

@@ -114,6 +114,8 @@ export default function Dashboard({ onOpenIssue, can }: {
   const draft = useEndpoint<any>("/rca/draft-feedback");
   // 지침 원천 — 답변이 무엇을 규칙으로 삼고 있는지. 비어 있으면 답변은 사례만 보고 나간다.
   const guides = useEndpoint<any>("/guides");
+  // loop 이 실제로 도는가. 결과(개선 큐)만 보면 죽어 있어도 화면이 똑같다.
+  const loop = useEndpoint<any>("/selfcheck/status");
   const sources = useEndpoint<any>("/knowledge/sources");
 
   const reco = useEndpoint<any>("/reco/stats");
@@ -440,6 +442,36 @@ export default function Dashboard({ onOpenIssue, can }: {
               )}
             </>
           ) : <Ok text="중복 클러스터 없음" />}
+        </Card>
+
+        <Card title="자기개선 loop" hint="주기 실행이 살아 있는가 — 결과만 보면 죽어도 모른다"
+          loading={loop.loading} error={loop.error} onRetry={loop.reload}>
+          {!loop.data ? null : (
+            <>
+              <div className="grid grid-cols-3 gap-2">
+                <StatTile label="마지막 실행"
+                  value={loop.data.age_hours == null ? "없음"
+                    : loop.data.age_hours < 48 ? `${Math.round(loop.data.age_hours)}시간 전`
+                    : `${Math.round(loop.data.age_hours / 24)}일 전`}
+                  tone={loop.data.stale ? "bad" : "good"}
+                  title={loop.data.last_run || "실행 기록 없음"} />
+                <StatTile label="누적 실행" value={loop.data.runs_recorded} />
+                <StatTile label="열린 제안" value={loop.data.queue?.open ?? 0} />
+              </div>
+              {loop.data.stale ? (
+                // 죽은 자동화는 없는 자동화보다 나쁘다 — 있다고 믿게 만들기 때문이다.
+                <div className="mt-2 rounded-lg border border-rose-800 bg-rose-950/30 px-3 py-2 text-[12px] text-rose-300">
+                  ⚠ {loop.data.max_age_hours}시간 넘게 실행되지 않았습니다. 스케줄러
+                  ({loop.data.scheduler_hint})가 멈췄거나 경로가 바뀌었을 수 있습니다.
+                  <div className="mt-1 font-mono text-[11px] text-rose-400/80">
+                    bash scripts/setup_self_improve_cron.sh
+                  </div>
+                </div>
+              ) : (
+                <Ok text={`정상 동작 중 · 마지막 리포트 ${loop.data.last_report || "—"}`} />
+              )}
+            </>
+          )}
         </Card>
 
         {/* 개선 큐 */}
